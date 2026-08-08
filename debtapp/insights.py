@@ -1,0 +1,717 @@
+"""Insight generation.
+
+Every insight is quantified in dollars or months — nothing here says "consider
+paying more" without telling you exactly what it buys. Insights are ranked by
+``stake`` (money on the table) so the most consequential advice sorts first.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional, Sequence
+
+from . import engine as E
+from .models import Debt, Profile, amortized_payment
+
+CRITICAL, SERIOUS, WARNING, GOOD, INFO = "critical", "serious", "warning", "good", "info"
+
+SEVERITY_RANK = {CRITICAL: 0, SERIOUS: 1, WARNING: 2, GOOD: 3, INFO: 4}
+SEVERITY_ICON = {CRITICAL: "🛑", SERIOUS: "🔥", WARNING: "⚠️", GOOD: "✅", INFO: "💡"}
+SEVERITY_LABEL = {CRITICAL: "Critical", SERIOUS: "Serious", WARNING: "Warning",
+                  GOOD: "Good news", INFO: "Opportunity"}
+
+
+# ------------------------------------------------------------------ formatting
+
+def money(x: Optional[float], cents: bool = False) -> str:
+    if x is None:
+        return "—"
+    return f"${x:,.2f}" if cents else f"${x:,.0f}"
+
+
+def duration(months: Optional[int]) -> str:
+    if months is None:
+        return "never"
+    y, m = divmod(int(months), 12)
+    if y and m:
+        return f"{y} yr {m} mo"
+    if y:
+        return f"{y} yr"
+    return f"{m} mo"
+
+
+@dataclass
+class Insight:
+    severity: str
+    title: str
+    body: str
+    action: Optional[str] = None
+    metric: Optional[str] = None
+    stake: float = 0.0  # dollars at stake — drives ordering
+
+    @property
+    def sort_key(self) -> tuple:
+        return (SEVERITY_RANK[self.severity], -self.stake)
+
+
+# --------------------------------------------------------------------- helpers
+
+def _delta(base: E.Schedule, alt: E.Schedule) -> tuple[float, Optional[int]]:
+    """(interest saved, months saved) going from base -> alt.
+
+    Only meaningful when *both* plans terminate — see :func:`_quotable`. If the
+    baseline never pays off its "total interest" is just wherever the simulation
+    gave up, so a dollar difference against it is meaningless.
+    """
+    saved = base.total_interest - alt.total_interest
+    months = None
+    if not base.never_pays_off and not alt.never_pays_off:
+        months = base.months - alt.months
+    return saved, months
+
+
+def _quotable(base: E.Schedule, alt: E.Schedule) -> bool:
+    """True when a dollars-saved figure between these two plans is honest."""
+    return not base.never_pays_off and not alt.never_pays_off
+
+
+def _residual(s: E.Schedule) -> float:
+    """Balance still outstanding when the simulation gave up."""
+    if s.ledger.empty:
+        return 0.0
+    last = s.ledger[s.ledger["month"] == s.ledger["month"].max()]
+    return float(last["end_balance"].sum())
+
+
+def _sim(debts, budget, **kw) -> E.Schedule:
+    return E.simulate(debts, budget, **kw)
+
+
+# ------------------------------------------------------------------ generators
+
+def generate(
+    debts: Sequence[Debt],
+    profile: Profile,
+    budget: Optional[float] = None,
+) -> list[Insight]:
+    """Produce the full ranked insight list for a user's situation."""
+    debts = [d for d in debts if d.balance > 0]
+    if not debts:
+        return [Insight(GOOD, "You're debt free", "No balances on file. Nothing to optimize — "
+                        "put the payment you were making into savings instead.")]
+
+    out: list[Insight] = []
+    total_balance = sum(d.balance for d in debts)
+    min_budget = E.minimum_budget(debts)
+    cur_budget = E.current_budget(debts)
+    # Explicit arg wins, then the user's stated budget, then what they actually
+    # pay today, then the bare minimums. Must match ui.common.effective_budget.
+    if not (budget and budget > 0):
+        budget = profile.monthly_budget or 0.0
+    if budget <= 0:
+        budget = max(cur_budget, min_budget)
+    strategy = profile.strategy or E.AVALANCHE
+    order = profile.custom_order
+
+    plan = _sim(debts, budget, strategy=strategy, custom_order=order)
+    mins = _sim(debts, min_budget, strategy=E.MINIMUM)
+    aval = _sim(debts, budget, strategy=E.AVALANCHE)
+    snow = _sim(debts, budget, strategy=E.SNOWBALL)
+
+    out += _feasibility(debts, plan, budget, min_budget)
+    out += _the_trap(debts, plan, mins, budget, min_budget)
+    out += _strategy_gap(plan, aval, snow, strategy)
+    out += _interest_burn(debts, plan, total_balance)
+    out += _per_debt(debts, plan)
+    out += _extra_payments(debts, budget, strategy, order, plan)
+    out += _rounding_and_biweekly(debts, budget, strategy, order, plan)
+    out += _windfall(debts, budget, strategy, order, plan)
+    out += _refinance(debts, plan, budget, strategy, order)
+    out += _balance_transfer(debts)
+    out += _utilization(debts)
+    out += _household(debts, profile, min_budget, budget, total_balance)
+    out += _emergency_fund(debts, profile)
+    out += _milestones(plan)
+    out += _cost_of_waiting(debts, budget, strategy, order, plan)
+
+    return sorted(out, key=lambda i: i.sort_key)
+
+
+def _feasibility(debts, plan, budget, min_budget) -> list[Insight]:
+    out = []
+    if budget < min_budget - 0.5:
+        gap = min_budget - budget
+        out.append(Insight(
+            CRITICAL,
+            "Your budget doesn't cover your minimum payments",
+            f"Your required payments total **{money(min_budget)}/mo** but your budget is "
+            f"**{money(budget)}/mo** — a shortfall of **{money(gap)}** every month. Missed "
+            "payments trigger late fees, penalty APRs (often 29.99%), and credit damage that "
+            "compounds far faster than the interest itself.",
+            action="Call each lender *before* you miss a payment and ask about hardship plans, "
+                   "forbearance, or a hardship APR reduction. Lenders almost always cooperate "
+                   "with someone who calls first.",
+            metric=f"{money(gap)}/mo short",
+            stake=gap * 12,
+        ))
+    if plan.never_pays_off:
+        out.append(Insight(
+            CRITICAL,
+            "At this payment level, this debt never goes away",
+            "Your payments are being consumed by interest faster than they reduce principal. "
+            "The balance is flat or growing — you could pay forever and still owe the full amount.",
+            action=f"You need to get above **{money(E.minimum_budget(debts) * 1.25)}/mo** to make "
+                   "real progress. Anything below that is renting the debt, not paying it.",
+            metric="Never",
+            stake=sum(d.balance for d in debts),
+        ))
+    for d in debts:
+        req = d.required_payment(d.balance + d.monthly_interest)
+        if req < d.monthly_interest - 0.005:
+            out.append(Insight(
+                CRITICAL,
+                f"{d.name}: the minimum payment is smaller than the interest",
+                f"{d.name} accrues **{money(d.monthly_interest, cents=True)}/mo** in interest but "
+                f"the minimum due is only **{money(req, cents=True)}**. Paying the minimum makes "
+                "the balance *grow* by "
+                f"**{money(d.monthly_interest - req, cents=True)}** every month.",
+                action=f"Pay at least {money(d.monthly_interest * 1.5)}/mo on {d.name} just to "
+                       "move backwards no longer.",
+                metric=f"+{money(d.monthly_interest - req, cents=True)}/mo",
+                stake=(d.monthly_interest - req) * 60,
+            ))
+    return out
+
+
+def _the_trap(debts, plan, mins, budget, min_budget) -> list[Insight]:
+    out = []
+    if budget <= min_budget + 0.5:
+        # They *are* on minimums.
+        if mins.never_pays_off:
+            years = "never"
+        else:
+            years = duration(mins.months)
+        out.append(Insight(
+            SERIOUS,
+            "You're on the minimum-payment track",
+            f"Paying only the minimum retires this debt in **{years}** and costs "
+            f"**{money(mins.total_interest)}** in interest — "
+            f"**{mins.interest_share:.0%}** of every dollar you hand over. Card minimums are a "
+            "percentage of the balance, so they shrink as you pay, which stretches the tail out "
+            "for years by design.",
+            action="Fix your payment at today's minimum instead of letting it shrink. That single "
+                   "change costs you nothing today and cuts years off the timeline.",
+            metric=years,
+            stake=mins.total_interest,
+        ))
+    elif mins.never_pays_off:
+        # No honest dollar figure exists against an unbounded baseline — but the
+        # lower bound is damning enough on its own.
+        left = _residual(mins)
+        out.append(Insight(
+            SERIOUS,
+            "Minimum payments alone would never clear this debt",
+            f"On minimums only, the required payment on at least one account is smaller than the "
+            f"interest it accrues, so the balance grows. After **{duration(mins.months)}** of "
+            f"paying every minimum on time you would have handed over "
+            f"**{money(mins.total_interest)}** in interest and *still owe* **{money(left)}**.\n\n"
+            f"Your **{money(budget)}/mo** plan escapes that entirely — it's the difference "
+            "between a finite debt and a permanent one.",
+            metric="Never vs " + (duration(plan.months) if not plan.never_pays_off else "—"),
+            stake=mins.total_interest,
+        ))
+    else:
+        saved, months = _delta(mins, plan)
+        if saved > 1 and _quotable(mins, plan):
+            out.append(Insight(
+                GOOD,
+                "Paying above the minimum is already saving you real money",
+                f"Versus minimums-only, your **{money(budget)}/mo** plan saves "
+                f"**{money(saved)}** in interest"
+                + (f" and **{duration(months)}** of payments" if months else "") + ". "
+                f"Minimums-only would have taken **{duration(mins.months)}** and cost "
+                f"**{money(mins.total_interest)}**.",
+                metric=money(saved),
+                stake=saved,
+            ))
+    return out
+
+
+def _strategy_gap(plan, aval, snow, strategy) -> list[Insight]:
+    out = []
+    if strategy != E.AVALANCHE and plan.never_pays_off and not aval.never_pays_off:
+        out.append(Insight(
+            CRITICAL,
+            "Reordering the same payments is the difference between escaping and not",
+            "Your current payment order never clears the debt, but sending the same total to "
+            f"your highest-APR balance first pays everything off in **{duration(aval.months)}**. "
+            "Not one extra dollar — just a different target.",
+            action="Pay minimums on everything, then put every remaining dollar on the highest "
+                   "APR until it's gone.",
+            metric=duration(aval.months),
+            stake=aval.total_interest,
+        ))
+    elif strategy != E.AVALANCHE and _quotable(plan, aval):
+        saved, months = _delta(plan, aval)
+        if saved > 1:
+            out.append(Insight(
+                SERIOUS,
+                "Reordering your payments saves money for free",
+                f"Same budget, same dollars out the door — just aimed at the highest APR first. "
+                f"Switching to **avalanche** saves **{money(saved)}** in interest"
+                + (f" and gets you out **{duration(months)}** sooner" if months and months > 0 else "")
+                + ". This costs you nothing; it is purely a change in *which* debt gets the extra.",
+                action="Send every spare dollar to your highest-APR debt while paying minimums on "
+                       "the rest.",
+                metric=money(saved),
+                stake=saved,
+            ))
+    cost, months = _delta(snow, aval)
+    if cost > 1 and strategy != E.SNOWBALL and _quotable(snow, aval):
+        out.append(Insight(
+            INFO,
+            "What the snowball method would cost you",
+            f"Attacking the *smallest balance* first clears individual accounts sooner, which some "
+            f"people need to stay motivated. The price of that motivation here is "
+            f"**{money(cost)}** in extra interest"
+            + (f" and **{duration(months)}** longer" if months and months > 0 else "")
+            + ". If you've quit debt plans before, that may be money well spent.",
+            metric=money(cost),
+            stake=cost * 0.3,
+        ))
+    return out
+
+
+def _interest_burn(debts, plan, total_balance) -> list[Insight]:
+    out = []
+    daily = sum(d.daily_interest for d in debts)
+    monthly = sum(d.monthly_interest for d in debts)
+    blended = (monthly * 12 / total_balance * 100) if total_balance else 0.0
+    year1 = E.where_the_money_goes(plan, 12)
+
+    out.append(Insight(
+        SERIOUS if blended >= 15 else WARNING,
+        f"You are paying {money(daily, cents=True)} per day just to keep this debt",
+        f"Across **{money(total_balance)}** at a blended **{blended:.1f}% APR**, interest accrues "
+        f"at **{money(daily, cents=True)}/day** — **{money(monthly)}/month**, "
+        f"**{money(monthly * 12)}/year** — before you pay down a single dollar of principal.\n\n"
+        f"Over the next 12 months you'll pay **{money(year1['payment'])}**, of which "
+        f"**{money(year1['interest'])}** disappears into interest and only "
+        f"**{money(year1['principal'])}** actually reduces what you owe.",
+        metric=f"{money(daily, cents=True)}/day",
+        stake=monthly * 12,
+    ))
+
+    if plan.total_paid > 0 and not plan.never_pays_off:
+        multiple = plan.total_paid / total_balance
+        out.append(Insight(
+            SERIOUS if multiple >= 1.35 else INFO,
+            f"You'll repay {multiple:.2f}× what you actually owe",
+            f"To clear **{money(total_balance)}** you will hand over **{money(plan.total_paid)}** — "
+            f"**{money(plan.total_interest)}** of it pure interest. That is "
+            f"**{plan.interest_share:.0%} of every dollar**, or "
+            f"**{plan.interest_share * 100:.0f}¢ on the dollar**, going to your lenders rather "
+            "than your own balance sheet.",
+            metric=f"{multiple:.2f}×",
+            stake=plan.total_interest,
+        ))
+    return out
+
+
+def _per_debt(debts, plan) -> list[Insight]:
+    out = []
+    if len(debts) < 2:
+        return out
+    worst = max(debts, key=lambda d: d.apr)
+    biggest_cost = max(debts, key=lambda d: d.monthly_interest)
+    out.append(Insight(
+        WARNING,
+        f"{worst.name} is your most expensive debt at {worst.apr:.2f}% APR",
+        f"Every $100 you send to **{worst.name}** earns you a guaranteed, tax-free "
+        f"**{worst.apr:.2f}%** return — better than any investment you can buy with certainty. "
+        f"It is currently costing **{money(worst.monthly_interest)}/mo**"
+        + (f", the largest interest line in your portfolio." if worst is biggest_cost
+           else f", while **{biggest_cost.name}** costs the most in raw dollars "
+                f"({money(biggest_cost.monthly_interest)}/mo).") ,
+        action=f"Until {worst.name} is gone, every spare dollar belongs there.",
+        metric=f"{worst.apr:.2f}%",
+        stake=worst.monthly_interest * 12,
+    ))
+
+    cheap = [d for d in debts if 0 < d.apr <= 5]
+    if cheap:
+        names = ", ".join(d.name for d in cheap)
+        out.append(Insight(
+            GOOD,
+            "Don't rush your cheap debt",
+            f"**{names}** sits at or below 5% APR. Paying it off early is one of the *worst* uses "
+            "of a spare dollar while higher-rate balances exist — and often worse than simply "
+            "investing. Pay the minimum and route everything else to the expensive debt.",
+            metric=f"{min(d.apr for d in cheap):.2f}% APR",
+            stake=0.0,
+        ))
+    return out
+
+
+def _extra_payments(debts, budget, strategy, order, plan) -> list[Insight]:
+    out = []
+    for extra, label in ((50, "$50"), (100, "$100"), (250, "$250")):
+        alt = _sim(debts, budget, strategy=strategy, custom_order=order, extra=extra)
+        if plan.never_pays_off and not alt.never_pays_off:
+            # Crossing from "never" to "finite" is the headline, not a dollar total.
+            out.append(Insight(
+                CRITICAL,
+                f"Adding {label}/month is what turns this from permanent into finite",
+                f"At your current payment the balance never clears. An extra **{label}/month** — "
+                f"about **{money(extra / 30.0, cents=True)}/day** — is enough to break the "
+                f"interest and pay everything off in **{duration(alt.months)}**.",
+                action=f"This is the single most important number on this page. Find {label}.",
+                metric=duration(alt.months),
+                stake=alt.total_interest,
+            ))
+            break
+        saved, months = _delta(plan, alt)
+        if saved <= 1 or not _quotable(plan, alt):
+            continue
+        per_day = extra / 30.0
+        out.append(Insight(
+            SERIOUS if extra <= 100 else INFO,
+            f"Adding {label}/month saves you {money(saved)}",
+            f"An extra **{label}/month** — about **{money(per_day, cents=True)}/day** — cuts your "
+            f"lifetime interest by **{money(saved)}**"
+            + (f" and pulls your debt-free date **{duration(months)}** closer" if months and months > 0 else "")
+            + f". Total cost of the extra payments: **{money(extra * (alt.months if not alt.never_pays_off else 0))}**, "
+            f"return: **{money(saved)}** you keep.",
+            action=f"Set up an automatic **{label}** transfer on payday so it leaves before you "
+                   "can spend it.",
+            metric=money(saved),
+            stake=saved,
+        ))
+    return out
+
+
+def _rounding_and_biweekly(debts, budget, strategy, order, plan) -> list[Insight]:
+    out = []
+    # Round the budget up to the next $50.
+    rounded = ((int(budget) // 50) + 1) * 50
+    bump = rounded - budget
+    if 0 < bump <= 50:
+        alt = _sim(debts, rounded, strategy=strategy, custom_order=order)
+        saved, months = _delta(plan, alt)
+        if saved > 1 and _quotable(plan, alt):
+            out.append(Insight(
+                INFO,
+                f"Rounding your payment up to {money(rounded)} saves {money(saved)}",
+                f"You're paying **{money(budget)}/mo**. Rounding to **{money(rounded)}** costs an "
+                f"extra **{money(bump, cents=True)}/month** and returns **{money(saved)}** in "
+                "avoided interest"
+                + (f", plus **{duration(months)}** off the clock" if months and months > 0 else "")
+                + ". It's the cheapest win on this page.",
+                metric=money(saved),
+                stake=saved,
+            ))
+
+    # Biweekly = 26 half-payments = 13 monthly payments a year.
+    bi = budget * 13.0 / 12.0
+    alt = _sim(debts, bi, strategy=strategy, custom_order=order)
+    saved, months = _delta(plan, alt)
+    if saved > 1 and _quotable(plan, alt):
+        out.append(Insight(
+            INFO,
+            f"Switching to biweekly payments saves {money(saved)}",
+            f"Pay **{money(budget / 2)}** every two weeks instead of **{money(budget)}** once a "
+            "month. Because there are 26 fortnights in a year, you make the equivalent of **13 "
+            "monthly payments** — one extra, without ever noticing it leave.\n\n"
+            f"Result: **{money(saved)}** less interest"
+            + (f" and **{duration(months)}** sooner" if months and months > 0 else "") + ".",
+            action="Align the two transfers with your paychecks. Confirm your lender applies "
+                   "payments on receipt rather than holding them until the due date.",
+            metric=money(saved),
+            stake=saved,
+        ))
+    return out
+
+
+def _windfall(debts, budget, strategy, order, plan) -> list[Insight]:
+    out = []
+    for amount in (1000, 5000):
+        if amount > sum(d.balance for d in debts):
+            continue
+        now = _sim(debts, budget, strategy=strategy, custom_order=order, lump_sum=amount, lump_month=1)
+        later = _sim(debts, budget, strategy=strategy, custom_order=order, lump_sum=amount, lump_month=13)
+        saved, months = _delta(plan, now)
+        delay_cost = later.total_interest - now.total_interest
+        if saved <= 1 or not _quotable(plan, now):
+            continue
+        out.append(Insight(
+            INFO,
+            f"A one-time {money(amount)} payment saves {money(saved)}",
+            f"Tax refund, bonus, or a sold couch — **{money(amount)}** applied to your highest-rate "
+            f"balance today removes **{money(saved)}** of future interest"
+            + (f" and **{duration(months)}** of payments" if months and months > 0 else "") + ". "
+            f"That's an effective **{saved / amount * 100:.0f}% return** on the lump sum.\n\n"
+            f"Waiting a year to apply the same {money(amount)} costs you "
+            f"**{money(delay_cost)}** extra. Timing matters more than size.",
+            metric=money(saved),
+            stake=saved,
+        ))
+    return out
+
+
+def _refinance(debts, plan, budget, strategy, order) -> list[Insight]:
+    """Would one consolidation loan beat the current mess?"""
+    out = []
+    total = sum(d.balance for d in debts)
+    weighted_apr = sum(d.balance * d.apr for d in debts) / total if total else 0.0
+    if weighted_apr < 10 or total < 2000:
+        return out
+
+    for offer_apr, term in ((12.0, 60), (9.0, 48)):
+        if offer_apr >= weighted_apr - 1:
+            continue
+        consolidated = Debt(name="Consolidation loan", kind="term_loan", balance=total,
+                            apr=offer_apr, term_months=term)
+        consolidated.min_payment = round(amortized_payment(total, offer_apr, term), 2)
+        alt = _sim([consolidated], max(budget, consolidated.min_payment), strategy=E.AVALANCHE)
+        saved, months = _delta(plan, alt)
+        if not _quotable(plan, alt) or saved <= 50:
+            continue
+        out.append(Insight(
+            SERIOUS if saved > 1000 else INFO,
+            f"A {offer_apr:.0f}% consolidation loan could save {money(saved)}",
+            f"Your balances average a blended **{weighted_apr:.1f}% APR**. Rolling "
+            f"**{money(total)}** into a single **{offer_apr:.0f}% / {term}-month** personal loan "
+            f"means one payment of **{money(consolidated.min_payment)}**, a fixed end date of "
+            f"**{duration(term)}**, and **{money(saved)}** less interest.\n\n"
+            "The catch, and it is a real one: consolidation only works if you *stop using the "
+            "cards*. Half of borrowers run the balances back up within two years and end up with "
+            "both the loan and the cards.",
+            action="Check your rate with a soft-pull prequalification (no credit hit) at two or "
+                   "three lenders and a local credit union before accepting anything.",
+            metric=money(saved),
+            stake=saved,
+        ))
+        break
+    return out
+
+
+def _balance_transfer(debts) -> list[Insight]:
+    """0% intro-APR transfer math, fee included."""
+    out = []
+    candidates = [d for d in debts if d.is_card and d.apr >= 15 and d.balance >= 500]
+    if not candidates:
+        return out
+    d = max(candidates, key=lambda x: x.balance * x.apr)
+    promo_months, fee_pct = 18, 3.0
+    fee = d.balance * fee_pct / 100.0
+    # Interest avoided if the balance is paid evenly across the promo window.
+    payment = d.balance / promo_months
+    bal, avoided = d.balance, 0.0
+    for _ in range(promo_months):
+        avoided += bal * d.monthly_rate
+        bal = max(0.0, bal - payment)
+    net = avoided - fee
+    if net <= 25:
+        return out
+    out.append(Insight(
+        SERIOUS if net > 500 else INFO,
+        f"A 0% balance transfer on {d.name} nets you {money(net)}",
+        f"**{d.name}** carries **{money(d.balance)}** at **{d.apr:.2f}%**. Moving it to a "
+        f"**0% for {promo_months} months** transfer card costs a **{fee_pct:.0f}% fee "
+        f"({money(fee)})** but avoids **{money(avoided)}** of interest — a net "
+        f"**{money(net)}** in your pocket.\n\n"
+        f"To clear it inside the promo window you'd pay **{money(payment)}/mo**. Miss that "
+        "window and the leftover balance snaps to the card's regular APR, which is usually "
+        "worse than where you started.",
+        action=f"Only do this if you can commit to {money(payment)}/mo for {promo_months} months. "
+               "Set a calendar reminder for month 16.",
+        metric=money(net),
+        stake=net,
+    ))
+    return out
+
+
+def _utilization(debts) -> list[Insight]:
+    out = []
+    cards = [d for d in debts if d.is_card and d.credit_limit > 0]
+    if not cards:
+        return out
+    total_bal = sum(d.balance for d in cards)
+    total_lim = sum(d.credit_limit for d in cards)
+    overall = 100 * total_bal / total_lim if total_lim else 0
+    maxed = [d for d in cards if (d.utilization or 0) >= 90]
+    high = [d for d in cards if (d.utilization or 0) >= 30]
+
+    if overall >= 30:
+        target = total_lim * 0.29
+        paydown = total_bal - target
+        out.append(Insight(
+            WARNING if overall < 70 else SERIOUS,
+            f"Your credit utilization is {overall:.0f}% — that's hurting your score",
+            f"You're using **{money(total_bal)}** of **{money(total_lim)}** in available credit. "
+            "Utilization is roughly 30% of a FICO score, and crossing above 30% typically costs "
+            "tens of points. Paying "
+            f"**{money(paydown)}** would bring you under the 30% line."
+            + (f"\n\n**{', '.join(d.name for d in maxed)}** "
+               f"{'is' if len(maxed) == 1 else 'are'} effectively maxed out, which is the single "
+               "most damaging pattern on a credit report." if maxed else ""),
+            action="A higher score is not cosmetic — it's the difference between a 9% and a 22% "
+                   "rate on your next loan. Ask for a credit-limit increase (it lowers "
+                   "utilization instantly without paying a dollar) but do not spend against it.",
+            metric=f"{overall:.0f}%",
+            stake=paydown * 0.2,
+        ))
+    elif high:
+        out.append(Insight(
+            INFO,
+            "One card is dragging your utilization up",
+            f"Overall you're at a healthy **{overall:.0f}%**, but "
+            f"**{', '.join(d.name for d in high)}** "
+            f"{'is' if len(high) == 1 else 'are'} individually above 30%. Scoring models look at "
+            "per-card utilization as well as the aggregate.",
+            metric=f"{max(d.utilization or 0 for d in high):.0f}%",
+            stake=100.0,
+        ))
+    return out
+
+
+def _household(debts, profile, min_budget, budget, total_balance) -> list[Insight]:
+    out = []
+    income = profile.monthly_income
+    if income <= 0:
+        return out
+    dti = 100 * min_budget / income
+    share = 100 * budget / income
+    if dti >= 36:
+        out.append(Insight(
+            SERIOUS if dti >= 43 else WARNING,
+            f"Your required debt payments eat {dti:.0f}% of your income",
+            f"Minimums alone are **{money(min_budget)}** against **{money(income)}/mo** of income. "
+            "Lenders treat 36% as the edge of comfortable and 43% as the ceiling for a qualified "
+            "mortgage — above that, new credit gets expensive or unavailable, which is exactly "
+            "when people reach for it.",
+            action="Two levers only: raise income or cut the balances. Refinancing helps the rate "
+                   "but rarely the ratio.",
+            metric=f"{dti:.0f}% DTI",
+            stake=min_budget * 12,
+        ))
+    if share >= 20:
+        out.append(Insight(
+            INFO,
+            f"You're routing {share:.0f}% of income at debt",
+            f"**{money(budget)}** of **{money(income)}** goes to debt each month. That's an "
+            "aggressive, effective payoff rate — just make sure it's sustainable, because a plan "
+            "you abandon in month 8 costs more than a slower one you finish.",
+            metric=f"{share:.0f}%",
+            stake=0.0,
+        ))
+    if total_balance > income * 12:
+        out.append(Insight(
+            WARNING,
+            "Your debt exceeds a full year of income",
+            f"**{money(total_balance)}** owed against **{money(income * 12)}** of annual income. "
+            "At this ratio, incremental optimization matters less than a structural change — a "
+            "consolidation, a higher income, or in the worst case a conversation with a "
+            "nonprofit credit counselor (NFCC members are free).",
+            metric=f"{total_balance / (income * 12):.1f}× income",
+            stake=total_balance * 0.05,
+        ))
+    return out
+
+
+def _emergency_fund(debts, profile) -> list[Insight]:
+    out = []
+    fund = profile.emergency_fund
+    if fund <= 0:
+        out.append(Insight(
+            WARNING,
+            "No emergency fund means the next surprise goes on a card",
+            "Attacking debt with zero cash buffer is how people end up back where they started: "
+            "one car repair, one vet bill, and the balance is right back on the highest-APR card.",
+            action="Park **$1,000** in a separate savings account first, *then* go hard at the "
+                   "debt. It costs you a little interest and saves you the whole plan.",
+            stake=1000.0,
+        ))
+        return out
+
+    top = max((d for d in debts if d.apr > 0), key=lambda d: d.apr, default=None)
+    if top and fund > 1000 and top.apr >= 12:
+        deployable = min(fund - 1000, top.balance)
+        if deployable > 100:
+            annual = deployable * top.apr / 100
+            out.append(Insight(
+                INFO,
+                f"Your idle cash is losing to {top.name} by {top.apr:.1f}% a year",
+                f"You hold **{money(fund)}** in cash earning maybe 4%, while **{top.name}** "
+                f"charges **{top.apr:.2f}%**. Deploying **{money(deployable)}** (keeping $1,000 "
+                f"back as a buffer) is a guaranteed **{money(annual)}/year** — risk-free, "
+                "tax-free, and better than the market's long-run average.",
+                action="Keep enough back that you never have to re-borrow. A cash buffer you "
+                       "spend and replace with 24% debt was never savings.",
+                metric=f"{money(annual)}/yr",
+                stake=annual,
+            ))
+    return out
+
+
+def _milestones(plan: E.Schedule) -> list[Insight]:
+    out = []
+    if not plan.payoff_month:
+        return out
+    first = min(plan.payoff_month.items(), key=lambda kv: kv[1])
+    out.append(Insight(
+        GOOD,
+        f"Your first account is gone in {duration(first[1])}",
+        f"**{first[0]}** clears in **{duration(first[1])}**. When it does, its payment doesn't "
+        "disappear — it rolls onto the next debt, and every payoff after that comes faster than "
+        "the last. The hardest part of this plan is the first year.",
+        metric=duration(first[1]),
+        stake=0.0,
+    ))
+    if not plan.never_pays_off and plan.payoff_date:
+        out.append(Insight(
+            GOOD,
+            f"Debt-free on {plan.payoff_date.strftime('%B %Y')}",
+            f"Hold this plan and the last dollar goes out in **{duration(plan.months)}**. From "
+            f"that month on, the **{money(plan.budget)}/mo** you're sending to lenders is yours — "
+            f"**{money(plan.budget * 12)}/year** redirected to your own balance sheet.",
+            metric=plan.payoff_date.strftime("%b %Y"),
+            stake=0.0,
+        ))
+    return out
+
+
+def _cost_of_waiting(debts, budget, strategy, order, plan) -> list[Insight]:
+    """What six months of doing nothing costs."""
+    if plan.never_pays_off:
+        return []
+    delayed = _sim(debts, E.minimum_budget(debts), strategy=E.MINIMUM, max_months=6)
+    # Balances after six months of minimums-only:
+    if delayed.ledger.empty:
+        return []
+    last = delayed.ledger[delayed.ledger["month"] == delayed.ledger["month"].max()]
+    future = []
+    for d in debts:
+        row = last[last["debt"] == d.name]
+        nd = Debt.from_dict(d.to_dict())
+        nd.balance = float(row["end_balance"].iloc[0]) if not row.empty else 0.0
+        if nd.balance > 0:
+            future.append(nd)
+    if not future:
+        return []
+    after = _sim(future, budget, strategy=strategy, custom_order=order)
+    cost = (after.total_interest + delayed.total_interest) - plan.total_interest
+    if cost <= 25:
+        return []
+    return [Insight(
+        SERIOUS,
+        f"Waiting six months to start costs you {money(cost)}",
+        f"If you coast on minimums until you 'get organized' and then begin this same plan in six "
+        f"months, you'll pay **{money(cost)}** more in total interest and finish "
+        f"**{duration(max(0, (after.months + 6) - plan.months))}** later. Nothing about your "
+        "situation improves in the meantime — the balances just get bigger.",
+        action="Start with whatever number you can commit to today, even if it isn't the ideal "
+               "one. The start date matters more than the amount.",
+        metric=money(cost),
+        stake=cost,
+    )]
