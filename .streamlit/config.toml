@@ -1,10 +1,38 @@
+# Colour roles mirror debtapp/theme.py::LIGHT. Two of these carry real weight:
+#
+#   backgroundColor  is what Streamlit paints dataframe cells and inputs with,
+#                    so it is the *surface* white, not the page. inject_css()
+#                    paints the page itself with the canvas grey — that split is
+#                    the whole reason tables now read as a separate plane
+#                    instead of dissolving into the background.
+#   sidebar          stays on the surface white so the nav reads as chrome
+#                    rather than as more page.
+
 [theme]
 base = "light"
 primaryColor = "#2a78d6"
-backgroundColor = "#f9f9f7"
-secondaryBackgroundColor = "#fcfcfb"
-textColor = "#0b0b0b"
-font = "sans serif"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f2f2ef"
+textColor = "#111110"
+linkColor = "#1f63b8"
+borderColor = "#e4e3dd"
+dataframeHeaderBackgroundColor = "#f2f2ef"
+dataframeBorderColor = "#e4e3dd"
+codeBackgroundColor = "#f7f7f4"
+baseRadius = "0.6rem"
+buttonRadius = "0.5rem"
+showWidgetBorder = true
+showSidebarBorder = true
+# Set here rather than in CSS: Streamlit's own rules for markdown, widgets and
+# dataframes are more specific than anything inject_css() can reach, so a
+# stylesheet override leaves half the app on the default face. Must stay in step
+# with debtapp.theme.FONT.
+font = "system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+
+[theme.sidebar]
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f2f2ef"
+borderColor = "#e4e3dd"
 
 [server]
 enableXsrfProtection = true

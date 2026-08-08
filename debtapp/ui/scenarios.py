@@ -7,8 +7,8 @@ import streamlit as st
 
 from .. import charts
 from .. import engine as E
-from .common import (active_debts, build_plan, chart, duration, effective_budget,
-                     is_dark, money, needs_debts, stat_row)
+from .common import (active_debts, banner, build_plan, chart, duration, effective_budget,
+                     is_dark, money, needs_debts, page_header, section, stat_row)
 
 
 def _delta_tile(label: str, base: E.Schedule, alt: E.Schedule) -> tuple:
@@ -32,12 +32,12 @@ def render() -> None:
     budget = effective_budget(debts, profile)
     base = build_plan(debts, profile)
 
-    st.markdown("### What if…")
-    st.caption("Every scenario below runs the same engine as your dashboard. Nothing here is "
-               "saved — it's a sandbox.")
+    page_header("What if…",
+                "Every scenario below runs the same engine as your dashboard. Nothing here is "
+                "saved — it's a sandbox.")
 
     # ------------------------------------------------------- the levers
-    st.markdown("#### Move the levers")
+    section("Move the levers")
     c1, c2, c3 = st.columns(3)
     with c1:
         extra = st.slider("Extra per month", 0, 2_000, 100, step=25, format="$%d")
@@ -71,18 +71,18 @@ def render() -> None:
     chart(charts.plan_race({"Your current plan": base, "This scenario": alt}, dark), key="race")
 
     # --------------------------------------------------- target-date solver
-    st.divider()
-    st.markdown("#### Work backwards from a date")
-    st.caption("Pick a deadline and we'll solve for the payment that hits it.")
+    section("Work backwards from a date",
+            "Pick a deadline and we'll solve for the payment that hits it.")
     years = st.slider("I want to be debt-free in", 1, 20,
                       value=max(1, min(20, (base.months // 12) or 3)), format="%d years")
     target = years * 12
     needed = E.budget_for_target(debts, target, profile.strategy, profile.custom_order)
 
     if needed is None:
-        st.warning(f"Clearing this debt in {years} year{'s' if years > 1 else ''} isn't reachable "
-                   "even by paying the entire balance immediately — the accounts have longer "
-                   "required terms than that.")
+        banner("warning",
+               f"Clearing this debt in {years} year{'s' if years > 1 else ''} isn't reachable "
+               "even by paying the entire balance immediately — the accounts have longer "
+               "required terms than that.")
     else:
         gap = needed - budget
         solved = E.simulate(debts, needed, strategy=profile.strategy,
@@ -97,13 +97,13 @@ def render() -> None:
             ("Total cost", money(solved.total_paid), f"over {duration(solved.months)}"),
         ])
         if gap > 0:
-            st.info(f"That's **{money(gap / 30, cents=True)} a day** more than you're paying now.")
+            banner("info", f"That's **{money(gap / 30, cents=True)} a day** more than you're "
+                           "paying now.")
 
     # ----------------------------------------------------- strategy bake-off
-    st.divider()
-    st.markdown("#### Strategy bake-off")
-    st.caption("Same budget, same debts — only the *order* changes. The gap between the bars is "
-               "money you get for free just by re-aiming your payments.")
+    section("Strategy bake-off",
+            "Same budget, same debts — only the *order* changes. The gap between the bars is "
+            "money you get for free just by re-aiming your payments.")
 
     plans = E.compare_strategies(debts, budget, custom_order=profile.custom_order)
     rows = []
@@ -120,8 +120,7 @@ def render() -> None:
           key="race_all")
 
     # ----------------------------------------------- extra-payment sensitivity
-    st.divider()
-    st.markdown("#### What each extra dollar buys")
+    section("What each extra dollar buys")
     curve = E.sensitivity_curve(debts, budget, strategy=profile.strategy,
                                 custom_order=profile.custom_order)
     tbl = curve.copy()

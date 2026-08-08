@@ -8,3 +8,6 @@ __pycache__/
 data/
 *.db
 .streamlit/secrets.toml
+
+# tools/screenshot.mjs needs Playwright; the install is local, not vendored
+node_modules/

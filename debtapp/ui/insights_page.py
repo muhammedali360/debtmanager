@@ -3,24 +3,24 @@
 from __future__ import annotations
 
 import html
-import re
 
 import streamlit as st
 
 from ..insights import SEVERITY_ICON, SEVERITY_LABEL, Insight, generate
-from .common import active_debts, effective_budget, needs_debts, stat_row, user_payments
+from .common import (active_debts, caption, effective_budget, esc_html, needs_debts,
+                     page_header, stat_row, user_payments)
 
 _ORDER = ["critical", "serious", "warning", "info", "good"]
 
 
 def _md(text: str) -> str:
-    """Minimal markdown → HTML for the insight bodies: escape first, then allow
-    **bold** and paragraph breaks. Nothing here is user-authored, but escaping
-    keeps a debt named `<b>` from breaking the layout."""
-    safe = html.escape(text)
-    safe = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", safe)
-    paras = [p.strip().replace("\n", " ") for p in safe.split("\n\n") if p.strip()]
-    return "".join(f"<p>{p}</p>" for p in paras)
+    """Insight bodies: escaped inline markdown, split into paragraphs.
+
+    Escaping matters even though none of this is user-authored — it keeps a debt
+    the user named `<b>` from rewriting the page.
+    """
+    paras = (p.strip().replace("\n", " ") for p in esc_html(text).split("\n\n"))
+    return "".join(f"<p>{p}</p>" for p in paras if p)
 
 
 def _card(ins: Insight) -> str:
@@ -48,21 +48,25 @@ def render() -> None:
     with st.spinner("Running the numbers…"):
         found = generate(debts, profile, budget, user_payments())
 
-    st.markdown("### Insights")
-    st.caption("Ranked by how much money is on the table. Everything below is computed from "
-               "your own numbers — no generic advice.")
+    page_header("Insights",
+                "Ranked by how much money is on the table. Everything below is computed from "
+                "your own numbers — no generic advice.")
 
     counts = {s: sum(1 for i in found if i.severity == s) for s in _ORDER}
-    # Only money still on the table. Interest already paid ranks its insight but
-    # is not something acting today can recover.
-    savings = sum(i.stake for i in found
-                  if i.severity in ("serious", "info") and i.recoverable)
+    # Only money still on the table. Interest already paid — and the projected
+    # interest bill as a whole — rank their insights but are not something acting
+    # today recovers, so they carry recoverable=False and are excluded here.
+    actionable = [i for i in found
+                  if i.severity in ("serious", "info") and i.recoverable and i.stake > 0]
+    # The biggest one, not the sum. A balance transfer, a bigger monthly payment
+    # and a consolidation loan all attack the same interest, so adding them up
+    # would advertise savings no user could actually collect.
+    best = max((i.stake for i in actionable), default=0.0)
     stat_row([
         ("Things to fix", str(counts["critical"] + counts["serious"]),
          "critical or serious", "critical" if counts["critical"] else "warning"),
-        ("Opportunities", str(counts["info"]), "money you could recover"),
-        ("Identified savings", f"${savings:,.0f}",
-         "if you acted on everything below", "good"),
+        ("Opportunities", str(len(actionable)), "priced moves you could make"),
+        ("Biggest single move", f"${best:,.0f}", "saved by the top card below", "good"),
     ])
 
     show = st.multiselect(
@@ -78,7 +82,7 @@ def render() -> None:
 
     st.markdown("".join(_card(i) for i in visible), unsafe_allow_html=True)
 
-    st.caption(
+    caption(
         "These projections assume monthly compounding, unchanging APRs, and no new borrowing. "
         "They're a planning tool, not financial advice — and if your minimums are unaffordable, "
         "a nonprofit credit counselor (NFCC member agencies are free) will beat any calculator."

@@ -90,7 +90,7 @@ def test_insights_page_produces_ranked_cards(user):
     at = _page("debtapp.ui.insights_page", uid, db)
     body = " ".join(m.value for m in at.markdown)
     assert 'class="ins ' in body
-    assert "Identified savings" in body
+    assert "Biggest single move" in body
 
 
 def test_scenarios_slider_changes_the_projection(user):
@@ -284,7 +284,7 @@ def test_debts_with_no_due_day_are_nudged_to_add_one(user):
     db.save_debts(uid, debts)
     at = _page("debtapp.ui.dashboard", uid, db)
     assert not at.exception
-    assert any("due day" in c.value for c in at.caption)
+    assert "due day" in " ".join(m.value for m in at.markdown)
     assert not any(b.label == "I paid this" for b in at.button)
 
 

@@ -14,9 +14,22 @@ import streamlit as st
 
 from .. import db, security
 from ..models import CREDIT_CARD, TERM_LOAN, Debt, Profile
+from ..theme import palette
+from .common import is_dark
 
 SESSION_QS = "s"  # query-param key holding the session token
 _STRENGTH_TONE = {0: "🔴", 1: "🔴", 2: "🟡", 3: "🟢", 4: "🟢"}
+
+# The pitch. Three claims, each one something the app actually does — a landing
+# page that oversells is the fastest way to lose the first session.
+_POINTS = [
+    ("principal", "Every number is yours",
+     "Projections run off your balances, APRs and minimums — not a generic calculator."),
+    ("interest", "See what the interest really costs",
+     "Down to the cent per day, and the share of every dollar your lender keeps."),
+    ("good", "Know what to do next",
+     "Ranked actions, each one priced in the dollars and months it saves you."),
+]
 
 
 def restore_session() -> None:
@@ -111,10 +124,44 @@ def render_recovery_codes_gate() -> bool:
     return True
 
 
-def render() -> None:
-    st.markdown("## Debt Manager")
-    st.caption("See exactly where your money is going — and what it would take to get out.")
+def _pitch() -> None:
+    """The left half of the sign-in screen."""
+    p = palette(is_dark())
+    points = "".join(
+        f'<li><span class="dot" style="background:{p[role]}"></span>'
+        f'<span><b>{head}</b>{body}</span></li>'
+        for role, head, body in _POINTS
+    )
+    st.markdown(
+        '<div class="auth-wrap">'
+        '<div class="auth-lockup"><span class="auth-mark">DM</span>Debt Manager</div>'
+        '<h1 class="auth-title">Know exactly what<br>your debt costs you.</h1>'
+        '<p class="auth-sub">Enter your cards and loans once. See where every dollar '
+        'goes, when the balance hits zero, and what it would take to get there '
+        'sooner.</p>'
+        f'<ul class="auth-points">{points}</ul>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
+
+def render() -> None:
+    st.markdown('<div style="height:6vh"></div>', unsafe_allow_html=True)
+    left, _, right = st.columns([1, 0.1, 1], vertical_alignment="center")
+    with left:
+        _pitch()
+    with right:
+        with st.container(key="authcard"):
+            _forms()
+        st.markdown(
+            '<p class="auth-foot">Your data stays in this app\'s database and is only used to '
+            'compute your projections. Passwords are hashed with bcrypt, session tokens are '
+            'stored hashed, and nothing is sent anywhere else.</p>',
+            unsafe_allow_html=True,
+        )
+
+
+def _forms() -> None:
     tab_in, tab_up, tab_reset = st.tabs(["Sign in", "Create account", "Forgot password"])
 
     # -------------------------------------------------------------- sign in
@@ -189,9 +236,3 @@ def render() -> None:
                                 "page once you're back in.")
                     except db.AuthError as e:
                         st.error(str(e))
-
-    st.caption(
-        "Your data is stored in this app's database and is only used to compute your "
-        "projections. Passwords are hashed with bcrypt and session tokens are stored hashed — "
-        "nothing is sent anywhere else."
-    )

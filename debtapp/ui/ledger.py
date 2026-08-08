@@ -16,8 +16,9 @@ import streamlit as st
 from .. import charts, db
 from .. import payments as P
 from ..models import Debt
-from .common import (active_debts, chart, current_user, is_dark, money, persist,
-                     refresh_payments, stat_row, user_payments)
+from .common import (active_debts, banner, caption, chart, current_user, esc, is_dark,
+                     money, page_header, persist, refresh_payments, section, stat_row,
+                     table, text, toast, user_payments)
 
 # Urgency reads off the colour before the words are read at all.
 _COLOUR = {P.OVERDUE: "red", P.DUE_TODAY: "orange", P.PAID: "green"}
@@ -62,7 +63,7 @@ def log_payment(debt: Debt, amount: float, when: date, interest: Optional[float]
 
 # ------------------------------------------------- the "did you pay?" widget
 
-def due_panel(heading: str = "#### Payments coming up", limit: Optional[int] = None) -> bool:
+def due_panel(heading: str = "Payments coming up", limit: Optional[int] = None) -> bool:
     """Render due/overdue accounts with a one-click way to confirm payment.
 
     Returns True if anything was drawn. Shared with the dashboard so the prompt
@@ -73,8 +74,8 @@ def due_panel(heading: str = "#### Payments coming up", limit: Optional[int] = N
     items = P.upcoming(debts, user_payments())
     if not items:
         if any(not d.due_day for d in debts):
-            st.caption("💡 Add a **due day** to each account on the *My debts* page and this "
-                       "turns into a payment calendar that tells you what's coming.")
+            section(heading, "Add a **due day** to each account on the *My debts* page and this "
+                             "turns into a payment calendar that tells you what's coming.")
         return False
 
     live = [i for i in items if i.is_actionable]
@@ -82,9 +83,7 @@ def due_panel(heading: str = "#### Payments coming up", limit: Optional[int] = N
     if limit:
         shown = shown[:limit]
 
-    st.markdown(heading)
-    if not live:
-        st.success("Nothing due right now — everything on file is paid for this cycle.")
+    section(heading, "" if live else "Everything on file is paid for this cycle.")
 
     for item in shown:
         cols = st.columns([4.2, 1.5, 1.5], vertical_alignment="center")
@@ -92,11 +91,11 @@ def due_panel(heading: str = "#### Payments coming up", limit: Optional[int] = N
         # An account with no required payment and no stated payment has no amount
         # we can honestly quote, so ask rather than assert.
         owed = money(item.amount) if item.amount > 0 else "amount not set"
-        cols[0].markdown(
+        cols[0].markdown(esc(
             f"{P.STATUS_ICON[item.status]} **{item.name}** · {owed} "
             f":{colour}[{item.phrase}] · {item.due_date:%d %b}"
             + (f" · {money(item.paid)} logged" if item.paid > 0 and item.status != P.PAID else "")
-        )
+        ))
         if item.status == P.PAID:
             cols[1].caption("Paid ✓")
             continue
@@ -108,14 +107,13 @@ def due_panel(heading: str = "#### Payments coming up", limit: Optional[int] = N
         if cols[2].button("I paid this", key=f"due_btn_{item.debt.id}_{item.name}",
                           width="stretch", disabled=amount <= 0):
             log_payment(item.debt, amount, date.today())
-            st.toast(f"Logged {money(amount)} to {item.name}")
+            toast(f"Logged {money(amount)} to {item.name}")
             st.rerun()
 
-    overdue = [i for i in shown if i.status == P.OVERDUE]
-    if overdue:
-        st.caption("Late fees land immediately, but nothing reaches your credit report until "
-                   "**30 days** past due. If you're going to miss one, call the lender first — "
-                   "a hardship note costs nothing and a 30-day mark costs you for seven years.")
+    if any(i.status == P.OVERDUE for i in shown):
+        caption("Late fees land immediately, but nothing reaches your credit report until "
+                "**30 days** past due. If you're going to miss one, call the lender first — "
+                "a hardship note costs nothing and a 30-day mark costs you for seven years.")
     return True
 
 
@@ -139,9 +137,9 @@ def _history_table(ordered: list) -> pd.DataFrame:
 
 
 def _log_form(debts: list[Debt]) -> None:
-    st.markdown("#### Log a payment")
-    st.caption("Backfill anything you've already sent — the ledger is only as useful as it is "
-               "complete.")
+    section("Log a payment",
+            "Backfill anything you've already sent — the ledger is only as useful as it is "
+            "complete.")
     # Account and date sit outside the form: widgets inside a form don't rerun
     # until submit, and the balance question below has to follow the date.
     left, right = st.columns(2)
@@ -162,7 +160,7 @@ def _log_form(debts: list[Debt]) -> None:
                  "statement shows a different figure, use theirs — it's the real one.")
         note = st.text_input("Note (optional)", placeholder="e.g. extra from my bonus")
         reduce_balance = st.checkbox(
-            f"Also take this off {debt.name}'s balance of {money(debt.balance)}",
+            esc(f"Also take this off {debt.name}'s balance of {money(debt.balance)}"),
             value=not is_backfill,
             help="Leave this off when you're backfilling a payment you've already accounted "
                  "for — the balance on file would otherwise be reduced by it twice.",
@@ -171,20 +169,21 @@ def _log_form(debts: list[Debt]) -> None:
         principal = amount - interest
         if amount > 0 and reduce_balance:
             if principal < 0:
-                st.error(f"At {money(amount)} against {money(interest, cents=True)} of interest, "
-                         f"this payment leaves **{money(-principal, cents=True)}** of unpaid "
-                         "interest on the balance — it goes *up*, not down.")
+                banner("error",
+                       f"At {money(amount)} against {money(interest, cents=True)} of interest, "
+                       f"this payment leaves **{money(-principal, cents=True)}** of unpaid "
+                       "interest on the balance — it goes *up*, not down.")
             else:
-                st.caption(f"**{money(principal, cents=True)}** comes off what you owe; "
-                           f"**{money(interest, cents=True)}** goes to {debt.name}'s lender. "
-                           f"New balance: **{money(max(0.0, debt.balance + interest - amount))}**.")
+                caption(f"**{money(principal, cents=True)}** comes off what you owe; "
+                        f"**{money(interest, cents=True)}** goes to {debt.name}'s lender. "
+                        f"New balance: **{money(max(0.0, debt.balance + interest - amount))}**.")
         elif amount > 0:
-            st.caption(f"Recorded as history only — {debt.name}'s balance of "
-                       f"**{money(debt.balance)}** stays as it is.")
+            caption(f"Recorded as history only — {debt.name}'s balance of "
+                    f"**{money(debt.balance)}** stays as it is.")
 
         if st.form_submit_button("Log this payment", type="primary") and amount > 0:
             log_payment(debt, amount, when, interest, note.strip(), reduce_balance)
-            st.toast(f"Logged {money(amount)} to {debt.name}")
+            toast(f"Logged {money(amount)} to {debt.name}")
             st.rerun()
 
 
@@ -195,12 +194,11 @@ def render() -> None:
     rows = user_payments()
     t = P.totals(rows)
 
-    st.markdown("### Ledger")
-    st.caption("Every payment you've actually made. Unlike the projections elsewhere in the app, "
-               "nothing on this page is an estimate.")
+    page_header("Ledger",
+                "Every payment you've actually made. Unlike the projections elsewhere in the "
+                "app, nothing on this page is an estimate.")
 
     due_panel()
-    st.divider()
 
     if not rows:
         st.info("No payments logged yet. Record one below — after two or three months this page "
@@ -211,6 +209,7 @@ def render() -> None:
 
     # --------------------------------------------------------------- counters
     share = t["interest_share"]
+    section("What this debt has really cost you")
     stat_row([
         ("Total paid", money(t["paid"]),
          f"{t['count']} payment{'s' if t['count'] != 1 else ''} since "
@@ -226,15 +225,13 @@ def render() -> None:
     ])
 
     if t["interest"] > 0:
-        st.markdown(
-            f"Since **{t['first']:%d %B %Y}** you have sent lenders **{money(t['paid'])}**. "
-            f"**{money(t['interest'])}** of that never touched your balance — it was rent on "
-            f"money you'd already borrowed. That's **{share * 100:.0f}¢ of every dollar**, "
-            f"or about **{money(t['interest'] / max(1, t['months']))} a month** of pure cost."
-        )
         year = P.interest_since_tracking(rows, 365)
-        if year > 0 and year < t["interest"]:
-            st.caption(f"In the last 12 months alone: **{money(year)}** in interest.")
+        recent = (f" In the last 12 months alone: **{money(year)}**."
+                  if 0 < year < t["interest"] else "")
+        text(f"Since **{t['first']:%d %B %Y}** you have sent lenders {money(t['paid'])}. "
+             f"**{money(t['interest'])}** of that never touched your balance — it was rent on "
+             f"money you'd already borrowed, about {money(t['interest'] / max(1, t['months']))} "
+             f"a month of pure cost.{recent}")
 
     # ----------------------------------------------------------------- charts
     chart(charts.ledger_cumulative(P.cumulative(rows), dark), key="ledger_cum")
@@ -249,22 +246,21 @@ def render() -> None:
           table_label="View monthly totals")
 
     # ------------------------------------------------------------- by account
-    st.markdown("#### What each account has cost you")
-    per = P.by_debt(rows)
-    view = per.copy()
+    section("Account by account")
+    view = P.by_debt(rows).copy()
     view["interest_share"] = view["interest_share"].map(lambda v: f"{v:.0%}")
     view["last"] = view["last"].map(lambda d: d.strftime("%d %b %Y"))
     for c in ("paid", "interest", "principal"):
         view[c] = view[c].map(lambda v: f"${v:,.2f}")
     view.columns = ["Account", "Payments", "Total paid", "Interest", "Principal",
                     "Interest share", "Last payment"]
-    st.dataframe(view, width="stretch", hide_index=True)
+    table(view, key="by_account", title="What each account has cost you")
 
     # ---------------------------------------------------------------- history
-    st.markdown("#### Payment history")
     newest_first = list(reversed(rows))
-    event = st.dataframe(_history_table(newest_first), width="stretch", hide_index=True,
-                         on_select="rerun", selection_mode="multi-row", key="hist_select")
+    event = table(_history_table(newest_first), key="history", title="Payment history",
+                  subtitle="Select rows to delete them.",
+                  on_select="rerun", selection_mode="multi-row")
     picked = list(getattr(event, "selection", {}).get("rows", []))
     if picked:
         if st.button(f"Delete {len(picked)} selected payment"
@@ -274,9 +270,8 @@ def render() -> None:
                     db.delete_payment(uid, newest_first[i].id)
             refresh_payments(uid)
             st.rerun()
-        st.caption("Deleting a payment removes it from these totals. It does **not** put the "
-                   "money back on your balance — correct the balance on *My debts* if you need to.")
+        caption("Deleting a payment removes it from these totals. It does **not** put the "
+                "money back on your balance — correct the balance on *My debts* if you need to.")
 
-    st.divider()
     if debts:
         _log_form(debts)

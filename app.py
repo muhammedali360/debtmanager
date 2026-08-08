@@ -12,7 +12,7 @@ from debtapp import engine as E
 from debtapp import payments as P
 from debtapp.ui import account, auth, dashboard, debts, insights_page, ledger, scenarios
 from debtapp.ui.common import (active_debts, build_plan, duration, effective_budget,
-                               inject_css, load_state, money, user_payments)
+                               esc_html, inject_css, load_state, money, user_payments)
 
 st.set_page_config(page_title="Debt Manager", page_icon="💸", layout="wide",
                    initial_sidebar_state="expanded")
@@ -38,18 +38,22 @@ def _sidebar_summary() -> None:
                           duration(plan.months), delta_color="off")
         st.sidebar.metric("Interest you'll pay", money(plan.total_interest),
                           f"{plan.interest_share:.0%} of every dollar", delta_color="inverse")
-    st.sidebar.caption(f"Costing you **{money(daily, cents=True)} a day** at "
-                       f"**{money(effective_budget(ds, profile))}/mo** on "
-                       f"{E.STRATEGY_LABELS[plan.strategy].split('—')[0].strip().lower()}.")
+
+    strategy = E.STRATEGY_LABELS[plan.strategy].split("—")[0].strip().lower()
+    note = (f"Costing you <b>{money(daily, cents=True)} a day</b> at "
+            f"{money(effective_budget(ds, profile))}/mo on {esc_html(strategy)}.")
 
     # The one thing that is actionable today rather than in five years.
     due = P.actionable(ds, user_payments())
     if due:
         head = due[0]
-        st.sidebar.markdown(
-            f"{P.STATUS_ICON[head.status]} **{head.name}** — {money(head.amount)} "
-            f"{head.phrase}" + (f"  \n_+{len(due) - 1} more due soon_" if len(due) > 1 else "")
-        )
+        more = f" +{len(due) - 1} more due soon." if len(due) > 1 else ""
+        note += (f"<br><br>{P.STATUS_ICON[head.status]} <b>{esc_html(head.name)}</b> — "
+                 f"{money(head.amount)} {esc_html(head.phrase)}.{more}")
+
+    # Written as HTML rather than markdown: two money figures in one string make
+    # Streamlit's markdown read everything between them as LaTeX.
+    st.sidebar.markdown(f'<div class="side-note">{note}</div>', unsafe_allow_html=True)
 
 
 def main() -> None:
@@ -58,9 +62,7 @@ def main() -> None:
     auth.restore_session()
 
     if not st.session_state.get("user_id"):
-        _, mid, _ = st.columns([1, 1.15, 1])
-        with mid:
-            auth.render()
+        auth.render()
         return
 
     # Straight after signup, make the user acknowledge their recovery codes —
@@ -70,7 +72,9 @@ def main() -> None:
 
     load_state(st.session_state.user_id)
 
-    st.sidebar.markdown("## 💸 Debt Manager")
+    st.sidebar.markdown(
+        '<div class="side-brand"><span class="mark">DM</span>Debt Manager</div>',
+        unsafe_allow_html=True)
     _sidebar_summary()
     st.sidebar.divider()
 

@@ -198,8 +198,28 @@ def test_recorded_interest_is_reported_but_not_counted_as_savings():
     assert sunk, titles(ins)
     assert sunk[0].stake == pytest.approx(510.0)   # 3 x $170 of real interest
     assert sunk[0].recoverable is False
-    assert all(i.recoverable for i in ins if i is not sunk[0]
-               and "cost you" not in i.title)
+    # The contract on `recoverable`: an insight may only claim its stake as
+    # savings if it proposes something to do. Cards that merely describe how
+    # expensive the situation is carry a stake for ranking and nothing more.
+    assert all(i.action for i in ins if i.recoverable and i.stake > 0)
+
+
+def test_the_savings_total_never_exceeds_the_interest_it_could_avoid():
+    """What the Insights page quotes has to be collectable.
+
+    Stakes like "minimums would cost you $80k" and "you'll repay 1.2x what you
+    owe" rank their cards but are not money an action recovers; counting them
+    advertised more savings than the whole debt was worth.
+    """
+    debts = [card(name="A", balance=8_400, apr=24.99, limit=12_000, pays=250),
+             card(name="B", balance=3_150, apr=21.49, limit=6_000, pays=95)]
+    ins = I.generate(debts, Profile(monthly_budget=600, monthly_income=6_200))
+    plan = E.simulate(debts, 600.0, strategy=E.AVALANCHE)
+
+    claimable = [i for i in ins
+                 if i.severity in (I.SERIOUS, I.INFO) and i.recoverable and i.stake > 0]
+    assert claimable, titles(ins)
+    assert max(i.stake for i in claimable) <= plan.total_interest
 
 
 def test_a_thin_ledger_makes_no_claims():

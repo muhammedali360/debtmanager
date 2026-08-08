@@ -4,6 +4,12 @@ House rules, applied consistently: thin marks, hairline grid, 2px surface gaps
 between stacked fills, a legend whenever there are two or more series, selective
 direct labels (endpoint or extreme only — never a number on every point), and
 one y-axis per plot. Every chart in the app also ships a table view alongside it.
+
+Titles are *not* drawn by Plotly. Plotly lays the title and a horizontal legend
+into the same top margin, so the two crowd each other at any height that fits on
+a dashboard. Each figure instead carries its title on ``layout.meta`` and
+``ui.common.chart`` renders it as the card header above the plot, which leaves
+the whole top margin to the legend.
 """
 
 from __future__ import annotations
@@ -14,14 +20,19 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from . import engine as E
-from .theme import palette, register_template, series_color
+from .theme import LEGEND_MARGIN, palette, register_template, series_color
 
 GAP = 2  # px of surface showing between adjacent fills
 
 
-def _fig(dark: bool, title: str, height: int = 340) -> go.Figure:
+def _fig(dark: bool, title: str, height: int = 300, subtitle: str = "",
+         legend: bool = True) -> go.Figure:
+    """A themed, empty figure. `title`/`subtitle` ride on ``meta`` for the card
+    header; `legend=False` reclaims the top margin the legend would have used."""
     fig = go.Figure()
-    fig.update_layout(template=register_template(dark), title_text=title, height=height)
+    fig.update_layout(template=register_template(dark), height=height,
+                      meta={"title": title, "subtitle": subtitle},
+                      margin_t=LEGEND_MARGIN if legend else 8)
     return fig
 
 
@@ -31,7 +42,7 @@ def _money_axis(fig: go.Figure) -> go.Figure:
 
 
 def _no_data(dark: bool, title: str, msg: str = "Add a debt to see this chart") -> go.Figure:
-    fig = _fig(dark, title, height=200)
+    fig = _fig(dark, title, height=150, legend=False)
     fig.add_annotation(text=msg, showarrow=False, xref="paper", yref="paper", x=0.5, y=0.5,
                        font=dict(color=palette(dark)["muted"], size=13))
     fig.update_xaxes(visible=False)
@@ -58,7 +69,8 @@ def balance_projection(schedule: E.Schedule, dark: bool, debt_order: Sequence[st
         wide["Other"] = wide[tail].sum(axis=1)
         names = head + ["Other"]
 
-    fig = _fig(dark, "Balance projection — what you still owe", height=380)
+    fig = _fig(dark, "Balance projection", height=330,
+               subtitle="What you still owe, month by month, until it's gone.")
     for i, name in enumerate(names):
         color = p["muted"] if name == "Other" else series_color(i, dark)
         fig.add_trace(go.Scatter(
@@ -67,42 +79,19 @@ def balance_projection(schedule: E.Schedule, dark: bool, debt_order: Sequence[st
             hovertemplate="%{fullData.name}: $%{y:,.0f}<extra></extra>",
         ))
 
-    # Direct-label the debt-free date rather than numbering every point.
+    # Direct-label the debt-free date rather than numbering every point. The
+    # label lands wherever the last wedge happens to be, so it carries its own
+    # surface behind it instead of relying on the fill underneath being pale.
     if not schedule.never_pays_off and schedule.payoff_date:
         fig.add_annotation(
-            x=wide.index[-1], y=0, yshift=18, text=f"debt-free {schedule.payoff_date:%b %Y}",
+            x=wide.index[-1], y=0, yshift=20, text=f"debt-free {schedule.payoff_date:%b %Y}",
             showarrow=False, xanchor="right", font=dict(color=p["good"], size=12),
+            bgcolor=p["surface"], borderpad=3,
         )
     return _money_axis(fig)
 
 
 # ------------------------------------------------------- principal vs interest
-
-def principal_vs_interest(schedule: E.Schedule, dark: bool) -> go.Figure:
-    """Cumulative split of every dollar paid."""
-    p = palette(dark)
-    if schedule.monthly.empty:
-        return _no_data(dark, "Where your payments go")
-
-    m = schedule.monthly.copy()
-    m["cum_principal"] = m["principal"].cumsum()
-    m["cum_interest"] = m["interest"].cumsum()
-
-    fig = _fig(dark, "Where your payments go, cumulatively", height=340)
-    for col, name, color in (("cum_principal", "Principal (reduces your balance)", p["principal"]),
-                             ("cum_interest", "Interest (kept by the lender)", p["interest"])):
-        fig.add_trace(go.Scatter(
-            x=m["date"], y=m[col], name=name, mode="lines", stackgroup="one",
-            fillcolor=color, line=dict(width=GAP, color=p["surface"]),
-            hovertemplate="%{fullData.name}: $%{y:,.0f}<extra></extra>",
-        ))
-
-    last = m.iloc[-1]
-    fig.add_annotation(x=last["date"], y=last["cum_principal"] + last["cum_interest"],
-                       text=f"${last['cum_interest']:,.0f} interest", showarrow=False,
-                       xanchor="right", yshift=14, font=dict(color=p["interest"], size=12))
-    return _money_axis(fig)
-
 
 def dollar_split_meter(schedule: E.Schedule, dark: bool, horizon: int = 12) -> go.Figure:
     """A single 100% bar: of every dollar you pay this year, how much is interest."""
@@ -113,7 +102,8 @@ def dollar_split_meter(schedule: E.Schedule, dark: bool, horizon: int = 12) -> g
         return _no_data(dark, "Every dollar you pay")
 
     ip = 100 * split["interest"] / total
-    fig = _fig(dark, f"Every dollar you pay over the next {horizon} months", height=190)
+    fig = _fig(dark, "Every dollar you pay", height=132,
+               subtitle=f"Where each dollar lands over the next {horizon} months.")
     for label, value, color in (("Principal", 100 - ip, p["principal"]),
                                 ("Interest", ip, p["interest"])):
         fig.add_trace(go.Bar(
@@ -123,7 +113,7 @@ def dollar_split_meter(schedule: E.Schedule, dark: bool, horizon: int = 12) -> g
             hovertemplate=f"{label}: %{{x:.0f}}¢ of every dollar<extra></extra>",
         ))
     fig.update_layout(barmode="stack", hovermode="closest", showlegend=True,
-                      margin=dict(l=8, r=8, t=48, b=28), bargap=0.55)
+                      margin=dict(l=4, r=4, t=LEGEND_MARGIN, b=26), bargap=0.62)
     fig.update_xaxes(range=[0, 100], ticksuffix="¢", showgrid=False)
     fig.update_yaxes(visible=False)
     # Only label the segment if it fits comfortably inside the bar.
@@ -142,7 +132,8 @@ def yearly_interest(schedule: E.Schedule, dark: bool) -> go.Figure:
     if y.empty:
         return _no_data(dark, "Interest by year")
 
-    fig = _fig(dark, "Interest paid, by year", height=320)
+    fig = _fig(dark, "Interest paid, by year", height=285,
+               subtitle="The number a statement never puts in front of you.")
     fig.add_trace(go.Bar(
         x=y["year"], y=y["principal"], name="Principal", marker_color=p["principal"],
         marker_line=dict(width=GAP, color=p["surface"]), marker_cornerradius=4,
@@ -174,7 +165,7 @@ def strategy_comparison(schedules: dict[str, E.Schedule], dark: bool,
     df = pd.DataFrame(rows).sort_values("interest", ascending=True)
 
     colors = [p["principal"] if k == highlight else p["muted"] for k in df["key"]]
-    fig = _fig(dark, "What each payoff strategy costs you", height=300)
+    fig = _fig(dark, "What each payoff strategy costs you", height=250, legend=False)
     fig.add_trace(go.Bar(
         x=df["interest"], y=df["strategy"], orientation="h", marker_color=colors,
         marker_cornerradius=4, marker_line=dict(width=GAP, color=p["surface"]),
@@ -185,7 +176,7 @@ def strategy_comparison(schedules: dict[str, E.Schedule], dark: bool,
         showlegend=False,
     ))
     fig.update_layout(hovermode="closest", bargap=0.4,
-                      margin=dict(l=8, r=90, t=48, b=8))
+                      margin=dict(l=4, r=92, t=8, b=4))
     fig.update_xaxes(tickprefix="$", separatethousands=True, showgrid=True,
                      gridcolor=p["grid"])
     fig.update_yaxes(showgrid=False)
@@ -200,7 +191,8 @@ def sensitivity(df: pd.DataFrame, dark: bool) -> go.Figure:
     if df.empty:
         return _no_data(dark, "Extra payments")
 
-    fig = _fig(dark, "What each extra dollar per month buys you", height=320)
+    fig = _fig(dark, "What each extra dollar buys you", height=280, legend=False,
+               subtitle="Interest saved against the extra you send every month.")
     fig.add_trace(go.Scatter(
         x=df["extra"], y=df["interest_saved"], mode="lines+markers",
         name="Interest saved", line=dict(width=2, color=p["good"]),
@@ -233,7 +225,8 @@ def payoff_timeline(schedule: E.Schedule, dark: bool) -> go.Figure:
     order = {n: i for i, n in enumerate(schedule.ledger["debt"].unique())}
     colors = [series_color(order.get(n, 0), dark) for n in names]
 
-    fig = _fig(dark, "When each account disappears", height=max(200, 46 * len(names) + 90))
+    fig = _fig(dark, "When each account disappears", legend=False,
+               height=max(150, 44 * len(names) + 62))
     fig.add_trace(go.Bar(
         x=months, y=names, orientation="h", marker_color=colors, marker_cornerradius=4,
         marker_line=dict(width=GAP, color=p["surface"]),
@@ -241,7 +234,7 @@ def payoff_timeline(schedule: E.Schedule, dark: bool) -> go.Figure:
         textposition="outside", textfont=dict(color=p["text_secondary"], size=12),
         hovertemplate="%{y} paid off in month %{x}<extra></extra>", showlegend=False,
     ))
-    fig.update_layout(hovermode="closest", bargap=0.42, margin=dict(l=8, r=70, t=48, b=32))
+    fig.update_layout(hovermode="closest", bargap=0.42, margin=dict(l=4, r=72, t=8, b=30))
     fig.update_xaxes(title_text="Months from today", showgrid=True, gridcolor=p["grid"],
                      title_font=dict(size=12, color=p["muted"]))
     fig.update_yaxes(autorange="reversed", showgrid=False)
@@ -259,7 +252,8 @@ def interest_by_debt(schedule: E.Schedule, dark: bool) -> go.Figure:
     t = t.sort_values("interest", ascending=True)
     order = {n: i for i, n in enumerate(schedule.ledger["debt"].unique())}
 
-    fig = _fig(dark, "Lifetime interest, by account", height=max(200, 44 * len(t) + 90))
+    fig = _fig(dark, "Lifetime interest, by account", legend=False,
+               height=max(150, 44 * len(t) + 62))
     fig.add_trace(go.Bar(
         x=t["interest"], y=t["debt"], orientation="h",
         marker_color=[series_color(order.get(n, 0), dark) for n in t["debt"]],
@@ -268,7 +262,7 @@ def interest_by_debt(schedule: E.Schedule, dark: bool) -> go.Figure:
         textfont=dict(color=p["text_secondary"], size=12),
         hovertemplate="%{y}: $%{x:,.0f} in interest<extra></extra>", showlegend=False,
     ))
-    fig.update_layout(hovermode="closest", bargap=0.4, margin=dict(l=8, r=90, t=48, b=8))
+    fig.update_layout(hovermode="closest", bargap=0.4, margin=dict(l=4, r=92, t=8, b=4))
     fig.update_xaxes(tickprefix="$", separatethousands=True, showgrid=True, gridcolor=p["grid"])
     fig.update_yaxes(showgrid=False)
     return fig
@@ -280,7 +274,7 @@ def plan_race(plans: dict[str, E.Schedule], dark: bool) -> go.Figure:
     """Total balance over time under competing plans — one axis, indexed to the
     same starting balance by construction."""
     p = palette(dark)
-    fig = _fig(dark, "How fast the balance falls", height=340)
+    fig = _fig(dark, "How fast the balance falls", height=300)
     drawn = 0
     for i, (label, s) in enumerate(plans.items()):
         if s.monthly.empty:
@@ -303,16 +297,17 @@ def plan_race(plans: dict[str, E.Schedule], dark: bool) -> go.Figure:
 def ledger_cumulative(cum: pd.DataFrame, dark: bool) -> go.Figure:
     """Money you have *actually* paid, split principal vs interest.
 
-    The dashboard twin of this chart is a projection. This one is history, so
-    the title says so — two similar-looking area charts that mean different
-    things is exactly how a user stops trusting either.
+    Everything else in the app projects forward; this is recorded history. The
+    title and subtitle say so outright, because an area chart that looks like
+    the dashboard's but means something else is how a user stops trusting both.
     """
     p = palette(dark)
     if cum.empty:
         return _no_data(dark, "What you've paid so far",
                         "Log a payment and your real history starts here")
 
-    fig = _fig(dark, "What you've actually paid, cumulatively", height=340)
+    fig = _fig(dark, "What you've actually paid", height=300,
+               subtitle="Recorded payments only — this is history, not a projection.")
     for col, name, color in (("cum_principal", "Principal (reduced your balance)", p["principal"]),
                              ("cum_interest", "Interest (kept by the lender)", p["interest"])):
         fig.add_trace(go.Scatter(
@@ -324,7 +319,8 @@ def ledger_cumulative(cum: pd.DataFrame, dark: bool) -> go.Figure:
     last = cum.iloc[-1]
     fig.add_annotation(x=last["date"], y=last["cum_paid"],
                        text=f"${last['cum_interest']:,.0f} to interest", showarrow=False,
-                       xanchor="right", yshift=14, font=dict(color=p["interest"], size=12))
+                       xanchor="right", yshift=14, font=dict(color=p["interest"], size=12),
+                       bgcolor=p["surface"], borderpad=3)
     return _money_axis(fig)
 
 
@@ -334,7 +330,8 @@ def payments_by_month(monthly: pd.DataFrame, dark: bool) -> go.Figure:
     if monthly.empty:
         return _no_data(dark, "Your payments by month", "Log a payment to start your history")
 
-    fig = _fig(dark, "Your payments, month by month", height=320)
+    fig = _fig(dark, "Your payments, month by month", height=285,
+               subtitle="Every month you've logged, and how much of it the lender kept.")
     fig.add_trace(go.Bar(
         x=monthly["month"], y=monthly["principal"], name="Principal",
         marker_color=p["principal"], marker_line=dict(width=GAP, color=p["surface"]),
@@ -361,7 +358,8 @@ def progress_history(snapshots: list[dict], dark: bool) -> go.Figure:
 
     first, last = df["total_balance"].iloc[0], df["total_balance"].iloc[-1]
     color = p["good"] if last < first else p["interest"]
-    fig = _fig(dark, "Your total balance, every time you've checked in", height=300)
+    fig = _fig(dark, "Your balance at every check-in", height=260, legend=False,
+               subtitle="The real curve, not the projected one.")
     fig.add_trace(go.Scatter(
         x=df["taken_at"], y=df["total_balance"], mode="lines+markers", name="Total balance",
         line=dict(width=2, color=color),

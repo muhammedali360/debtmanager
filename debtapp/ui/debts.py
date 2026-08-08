@@ -7,7 +7,7 @@ import streamlit as st
 
 from .. import engine as E
 from ..models import CREDIT_CARD, LOAN_SUBTYPES, TERM_LOAN, Debt
-from .common import current_user, money, persist, stat_row
+from .common import banner, caption, current_user, money, page_header, persist, section, stat_row
 
 # "id" rides along hidden (column_config maps it to None). It is what keeps a
 # card's logged payment history attached to it across renames and edits.
@@ -58,15 +58,15 @@ def render() -> None:
     debts: list[Debt] = st.session_state.debts
     profile = st.session_state.profile
 
-    st.markdown("### My debts")
-    st.caption("Everything here saves automatically. Come back any time and your numbers "
-               "will be waiting.")
+    page_header("My debts",
+                "Everything here saves automatically. Come back any time and your numbers "
+                "will be waiting.")
 
     # ----------------------------------------------------------- credit cards
-    st.markdown("#### Credit cards & revolving credit")
-    st.caption("Minimums on revolving credit are a *percentage of the balance*, so they shrink "
-               "as you pay — which is exactly why they take so long to clear. Set the percentage "
-               "and the dollar floor from your statement.")
+    section("Credit cards & revolving credit",
+            "Minimums on revolving credit are a *percentage of the balance*, so they shrink as "
+            "you pay — which is exactly why they take so long to clear. Set the percentage and "
+            "the dollar floor from your statement.")
     cards = st.data_editor(
         _to_df(debts, CREDIT_CARD, CARD_COLS),
         num_rows="dynamic", width="stretch", hide_index=True, key="ed_cards",
@@ -92,9 +92,9 @@ def render() -> None:
     )
 
     # ------------------------------------------------------------ term loans
-    st.markdown("#### Term loans")
-    st.caption("Auto, student, personal, mortgage — anything with a fixed monthly payment "
-               "and an end date.")
+    section("Term loans",
+            "Auto, student, personal, mortgage — anything with a fixed monthly payment and an "
+            "end date.")
     loans = st.data_editor(
         _to_df(debts, TERM_LOAN, LOAN_COLS),
         num_rows="dynamic", width="stretch", hide_index=True, key="ed_loans",
@@ -119,8 +119,9 @@ def render() -> None:
     new_debts = _from_df(cards, CREDIT_CARD, CARD_COLS) + _from_df(loans, TERM_LOAN, LOAN_COLS)
 
     # ------------------------------------------------------------- the budget
-    st.divider()
-    st.markdown("#### Your monthly plan")
+    section("Your monthly plan",
+            "One budget drives every projection in the app, so the differences between "
+            "strategies come from ordering alone.")
     min_budget = E.minimum_budget(new_debts) if new_debts else 0.0
     cur_budget = E.current_budget(new_debts) if new_debts else 0.0
 
@@ -162,9 +163,10 @@ def render() -> None:
 
     if new_debts:
         if budget < min_budget:
-            st.error(f"Your budget of **{money(budget)}** is below the **{money(min_budget)}** "
-                     "your lenders require. Projections below assume payments get pro-rated, "
-                     "which in reality means late fees and penalty APRs.")
+            banner("error",
+                   f"Your budget of {money(budget)} is below the **{money(min_budget)}** your "
+                   "lenders require. Projections below assume payments get pro-rated, which in "
+                   "reality means late fees and penalty APRs.")
         stat_row([
             ("Total owed", money(sum(d.balance for d in new_debts))),
             ("Required minimums", f"{money(min_budget)}/mo"),
@@ -190,4 +192,4 @@ def render() -> None:
         # Recomputed *after* the write: saving stamps ids onto brand-new rows, and
         # signing the pre-write state would make the next rerun look dirty again.
         st.session_state._saved_sig = signature()
-    st.caption("✓ Saved")
+    caption("✓ Saved")

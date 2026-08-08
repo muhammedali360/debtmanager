@@ -8,19 +8,19 @@ import pandas as pd
 import streamlit as st
 
 from .. import db, security
-from .common import active_debts, build_plan, current_user, money, user_payments
+from .common import (active_debts, build_plan, current_user, page_header, section, subhead,
+                     table, user_payments)
 from . import auth
 
 
 def render() -> None:
     uid = current_user()
-    st.markdown("### Account")
-    st.caption(f"Signed in as **{db.get_email(uid)}**")
+    page_header("Account", f"Signed in as **{db.get_email(uid)}**")
 
-    st.markdown("#### Security")
+    section("Security")
     left, right = st.columns(2)
     with left:
-        st.markdown("**Change password**")
+        subhead("Change password")
         old = st.text_input("Current password", type="password", key="ac_old")
         new = st.text_input("New password", type="password", key="ac_new",
                             help=f"At least {security.MIN_LENGTH} characters.")
@@ -43,7 +43,7 @@ def render() -> None:
                     st.error(str(e))
 
     with right:
-        st.markdown("**Recovery codes**")
+        subhead("Recovery codes")
         left_codes = db.unused_recovery_code_count(uid)
         if left_codes == 0:
             st.warning("You have no unused recovery codes. Without one you cannot get back "
@@ -58,29 +58,26 @@ def render() -> None:
             st.download_button("Download codes", "\n".join(st.session_state.new_codes),
                                file_name="debt-manager-recovery-codes.txt", mime="text/plain")
 
-        st.markdown("**Sessions**")
+        subhead("Sessions")
         st.caption(f"{db.active_session_count(uid)} active session(s).")
         if st.button("Sign out everywhere"):
             db.end_all_sessions(uid)
             auth.sign_out()
 
-    with st.expander("Recent sign-in activity"):
-        events = db.recent_logins(uid)
-        if not events:
-            st.caption("Nothing recorded yet.")
-        else:
-            hist = pd.DataFrame(events)
-            hist["at"] = pd.to_datetime(hist["at"], format="mixed", utc=True
-                                        ).dt.strftime("%d %b %Y, %H:%M UTC")
-            hist["ok"] = hist["ok"].map({1: "✅ Success", 0: "❌ Failed"})
-            hist["note"] = hist["note"].fillna("")
-            hist.columns = ["When", "Result", "Note"]
-            st.dataframe(hist, width="stretch", hide_index=True)
-            st.caption("Failed attempts you don't recognise mean someone knows your email. "
-                       "Five failures locks the account for 15 minutes.")
+    events = db.recent_logins(uid, limit=6)
+    if events:
+        hist = pd.DataFrame(events)
+        hist["at"] = pd.to_datetime(hist["at"], format="mixed", utc=True
+                                    ).dt.strftime("%d %b %Y, %H:%M UTC")
+        hist["ok"] = hist["ok"].map({1: "✅ Success", 0: "❌ Failed"})
+        hist["note"] = hist["note"].fillna("")
+        hist.columns = ["When", "Result", "Note"]
+        section("Recent sign-in activity",
+                "Failed attempts you don't recognise mean someone knows your email. Five "
+                "failures locks the account for 15 minutes.")
+        table(hist, key="logins")
 
-    st.divider()
-    st.markdown("#### Export your data")
+    section("Export your data")
     debts = st.session_state.get("debts", [])
     profile = st.session_state.profile
     paid = user_payments()
@@ -115,8 +112,7 @@ def render() -> None:
             disabled=sched.empty, width="stretch",
         )
 
-    st.divider()
-    st.markdown("#### Danger zone")
+    section("Danger zone")
     with st.expander("Delete my account and all my data"):
         st.warning("This erases your debts, history, and login. It cannot be undone.")
         confirm = st.text_input('Type **DELETE** to confirm', key="del_confirm")

@@ -8,8 +8,15 @@ import streamlit as st
 from .. import charts, db
 from .. import engine as E
 from . import ledger
-from .common import (active_debts, build_plan, chart, current_user, duration,
-                     effective_budget, is_dark, money, needs_debts, stat_row)
+from .common import (active_debts, banner, build_plan, chart, current_user, duration,
+                     effective_budget, is_dark, money, needs_debts, page_header, section,
+                     stat_row)
+
+
+def _money_cols(df: pd.DataFrame, cols) -> pd.DataFrame:
+    for c in cols:
+        df[c] = df[c].map(lambda v: f"${v:,.2f}")
+    return df
 
 
 def _schedule_table(schedule: E.Schedule) -> pd.DataFrame:
@@ -20,9 +27,7 @@ def _schedule_table(schedule: E.Schedule) -> pd.DataFrame:
     m["Month"] = m["date"].dt.strftime("%b %Y")
     out = m[["Month", "payment", "interest", "principal", "balance"]].copy()
     out.columns = ["Month", "Payment", "Interest", "Principal", "Balance remaining"]
-    for c in out.columns[1:]:
-        out[c] = out[c].map(lambda v: f"${v:,.2f}")
-    return out
+    return _money_cols(out, out.columns[1:])
 
 
 def render() -> None:
@@ -40,9 +45,11 @@ def render() -> None:
     monthly_int = sum(d.monthly_interest for d in debts)
     blended = (monthly_int * 12 / total * 100) if total else 0.0
 
-    st.markdown("### Dashboard")
-    st.caption(f"Projected on **{E.STRATEGY_LABELS[plan.strategy].lower()}** at "
-               f"**{money(budget)}/month**. Change either on the *My debts* page.")
+    page_header(
+        "Dashboard",
+        f"Projected on {E.STRATEGY_LABELS[plan.strategy].lower()} at "
+        f"{money(budget)}/month. Change either on the My debts page.",
+    )
 
     # ------------------------------------------------------------------ tiles
     if plan.never_pays_off:
@@ -68,20 +75,19 @@ def render() -> None:
     ])
 
     if plan.short_months:
-        st.error(
-            f"Your budget of **{money(budget)}/mo** can't cover the required minimums for "
-            f"**{plan.short_months}** month{'s' if plan.short_months > 1 else ''}. The projection "
-            "splits what you have proportionally; real lenders would charge late fees and could "
-            "raise your APR to ~30%. Call them before that happens."
-        )
+        banner("error",
+               f"Your budget of {money(budget)}/mo can't cover the required minimums for "
+               f"**{plan.short_months}** month{'s' if plan.short_months > 1 else ''}. The "
+               "projection splits what you have proportionally; real lenders would charge late "
+               "fees and could raise your APR to ~30%. Call them before that happens.")
 
     # ------------------------------------------------------------- what's due
     # What's due beats what's projected — a payment you forget costs more than
     # any ordering decision below.
-    if ledger.due_panel(limit=4):
-        st.divider()
+    ledger.due_panel(limit=4)
 
     # ----------------------------------------------------------------- charts
+    section("The plan", "Where your money goes between now and the last payment.")
     chart(charts.balance_projection(plan, dark, [d.name for d in debts]),
           _schedule_table(plan), key="proj", table_label="View month-by-month schedule")
 
@@ -93,24 +99,20 @@ def render() -> None:
         tbl = y.copy()
         if not tbl.empty:
             tbl.columns = ["Year", "Interest", "Principal"]
-            tbl["Interest"] = tbl["Interest"].map(lambda v: f"${v:,.2f}")
-            tbl["Principal"] = tbl["Principal"].map(lambda v: f"${v:,.2f}")
+            tbl = _money_cols(tbl, ("Interest", "Principal"))
         chart(charts.yearly_interest(plan, dark), tbl, key="yearly",
               table_label="View yearly totals")
 
-    chart(charts.principal_vs_interest(plan, dark), key="cum")
-
+    section("Account by account", "Which balance is costing you most, and what clears first.")
     left, right = st.columns([1, 1])
     with left:
         chart(charts.payoff_timeline(plan, dark), key="timeline")
     with right:
-        t = plan.per_debt_totals()
-        tbl = t.copy()
+        tbl = plan.per_debt_totals().copy()
         if not tbl.empty:
             tbl["payoff_month"] = tbl["payoff_month"].map(
                 lambda m: duration(int(m)) if pd.notna(m) else "never")
-            for c in ("interest", "principal", "payment"):
-                tbl[c] = tbl[c].map(lambda v: f"${v:,.2f}")
+            tbl = _money_cols(tbl, ("interest", "principal", "payment"))
             tbl.columns = ["Account", "Interest", "Principal", "Total paid", "Paid off in"]
         chart(charts.interest_by_debt(plan, dark), tbl, key="bydebt",
               table_label="View per-account totals")
@@ -118,9 +120,8 @@ def render() -> None:
     # --------------------------------------------------------------- progress
     snaps = db.load_snapshots(current_user())
     if len(snaps) >= 2:
-        st.markdown("#### Your progress")
-        st.caption("Update your balances whenever you check in and this tracks the real curve, "
-                   "not the projected one.")
+        section("Your progress",
+                "Update your balances whenever you check in and this tracks the real curve.")
         tbl = pd.DataFrame(snaps)[["taken_at", "total_balance", "blended_apr", "debt_count"]]
         tbl["taken_at"] = pd.to_datetime(tbl["taken_at"], format="mixed",
                                          utc=True).dt.strftime("%d %b %Y")

@@ -18,13 +18,21 @@ where the money is going, and find out what it would actually take to get out.
   how much of it the lender kept, and the cents-on-the-dollar split per account.
   Those figures are recorded history, never re-derived, which makes them the only
   numbers in the app that carry no assumptions.
-- **Visualizations**: balance projection, cumulative principal vs interest, the
-  cents-on-the-dollar split, interest by year, payoff timeline, per-account
-  interest, a strategy bake-off, and the ledger's actual-payments history.
-- **~25 quantified insights**, ranked by dollars at stake — overdue payments and
+- **Visualizations**: balance projection, the cents-on-the-dollar split, interest
+  by year, payoff timeline, per-account interest, a strategy bake-off, and the
+  ledger's actual-payments history. Each one sits on its own card with the title
+  in the card header — Plotly lays a title and a horizontal legend into the same
+  strip of top margin, so a chart that draws its own title crowds its legend.
+- **~15 quantified insights**, ranked by dollars at stake — overdue payments and
   what a miss really costs, balance transfers net of fees, consolidation,
-  utilization and its credit-score cost, debt-to-income, biweekly payments,
-  windfall timing, the cost of waiting six months.
+  utilization and its credit-score cost, debt-to-income, extra payments (one
+  card with a ladder of tiers, not one card per tier), windfall timing, the cost
+  of waiting six months.
+
+  Each card carries a `recoverable` flag, and the page totals only the insights
+  where it is true. A stake like "minimums would cost you $77,876" ranks its
+  card but is not money any action recovers, and the page must not add it to a
+  savings figure.
 - **What-if sandbox**: extra payments, lump sums, annual raises, and a solver
   that works backwards from a target debt-free date to the payment it requires.
 - **Accounts and persistence** so you can come back and pick up where you left
@@ -138,6 +146,12 @@ instead of SQLite. All 217 tests pass on both.
   and dark against their own surfaces). Every chart ships a table view, a legend
   for two or more series, and selective direct labels rather than a number on
   every point.
+- **Every string bound for markdown goes through `ui.common.esc`.** Streamlit
+  renders `$…$` as LaTeX, so a sentence carrying two money figures — "**$75.07**
+  comes off what you owe; **$174.93** goes to the lender" — silently collapses
+  into a run of maths glyphs. Nothing throws, so `tools/screenshot.mjs` drives a
+  real browser over every page and fails on a `.katex` node or a stray `**`.
+  That is the only way this class of bug gets caught rather than shipped.
 
 ## Layout
 
@@ -149,12 +163,14 @@ debtapp/
   payments.py          due-date calendar + the recorded-payment ledger
   insights.py          ranked, quantified advice
   charts.py            Plotly figures
-  theme.py             validated palette + Plotly template
+  theme.py             design tokens: surfaces, type, palette, Plotly template
   security.py          password policy + recovery codes (no storage)
   db.py                persistence (SQLite or Postgres), bcrypt auth, sessions
   _pools.py            Postgres connection pools, one per DSN
+  ui/common.py         the stylesheet + layout primitives every page builds from
   ui/                  one module per page
 tests/                 engine, insight, and end-to-end UI tests
+tools/screenshot.mjs   browser pass: screenshots + markup-leak check
 ```
 
 ## Disclaimer
