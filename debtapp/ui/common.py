@@ -193,11 +193,24 @@ def inject_css() -> None:
     [class*="st-key-card-"] .stPlotlyChart {{ margin-top: 6px; }}
 
     /* -------------------------------------------------------------- tables */
+    /* No `overflow: hidden` here, deliberately. Streamlit renders a table's
+       toolbar — delete row, add row, download, search, fullscreen — as a child
+       of stDataFrame positioned *above* the grid, so clipping the box deletes
+       every one of those controls. On the debts page that took the only way to
+       remove an account with it: the row checkboxes selected fine and then
+       nothing appeared to act on the selection. Rounded corners are not worth
+       a table you cannot act on. */
     [data-testid="stDataFrame"], [data-testid="stDataFrameResizable"] {{
         font-variant-numeric: tabular-nums;
-        border-radius: 10px; overflow: hidden;
+        border-radius: 10px;
     }}
     [data-testid="stDataFrame"] {{ border: 1px solid {p['border']}; }}
+    /* The toolbar floats over the copy above the table, which on a transparent
+       background reads as icons scattered on the page. Give it the surface. */
+    [data-testid="stElementToolbar"] {{
+        background: {p['surface']}; border: 1px solid {p['border']};
+        border-radius: 9px;
+    }}
     [class*="st-key-card-"] [data-testid="stDataFrame"] {{ border-color: {p['border']}; }}
 
     /* ---------------------------------------------------------- expanders */
