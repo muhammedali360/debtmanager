@@ -54,10 +54,12 @@ def log_payment(debt: Debt, amount: float, when: date, interest: Optional[float]
     # The grids on the My debts page keep their edits as a delta against whatever
     # dataframe they're handed, so an edit made earlier in this session would be
     # replayed over the balance we just reduced — silently undoing the payment on
-    # that page's next autosave. Dropping their state forces a rebuild from the
-    # stored values. Cheap insurance; the user loses nothing but an unsaved cell.
-    for grid in ("ed_cards", "ed_loans"):
-        st.session_state.pop(grid, None)
+    # that page's next autosave. Bumping the revision is what drops that state:
+    # it gives both grids keys they have not seen, which is the signal they
+    # rebuild from the stored values on. Cheap insurance; the user loses nothing
+    # but an unsaved cell. (Popping the keys directly does not work — they carry
+    # the revision as a suffix, so the names to pop are not knowable from here.)
+    st.session_state.debts_rev = st.session_state.get("debts_rev", 0) + 1
     st.session_state.pop("_saved_sig", None)
 
 
