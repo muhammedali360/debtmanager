@@ -6,6 +6,7 @@ which ``debtapp.db`` reads at import time — hence the reload in the fixture.
 
 import importlib
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 from conftest import fresh_db
@@ -403,3 +404,38 @@ def test_recovery_flow_resets_the_password_from_the_ui(tmp_path, monkeypatch):
 
     assert not at.exception
     assert db.verify_user("lost@user.com", "brand-new-passphrase") == uid
+
+
+# ------------------------------------------------------------ staying signed in
+
+def test_the_session_token_survives_a_page_switch(user):
+    """Streamlit rewrites the URL without its query string when you change
+    pages, which drops the session token. If it isn't re-asserted, refreshing on
+    any page but the default silently signs the user out."""
+    uid, db = user
+    token = db.start_session(uid)
+
+    def script():
+        from debtapp.ui import auth
+        auth.restore_session()
+
+    at = AppTest.from_function(script)
+    at.session_state["user_id"] = uid
+    at.session_state["token"] = token
+    at.run(timeout=60)  # no query param, exactly as after a page switch
+
+    assert not at.exception
+    assert at.query_params.get("s") == [token]  # AppTest reports params as lists
+
+
+def test_the_real_entry_point_boots_signed_in(user):
+    """Every other test calls a page's ``render()`` directly, so nothing covers
+    app.py's own wiring — the one place a bad call reaches every single user."""
+    uid, db = user
+    token = db.start_session(uid)
+
+    at = AppTest.from_file(str(Path(__file__).parent.parent / "app.py"))
+    at.query_params["s"] = token
+    at.run(timeout=90)
+
+    assert not at.exception, f"app.py raised: {[e.value for e in at.exception]}"

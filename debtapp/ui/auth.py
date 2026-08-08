@@ -35,6 +35,12 @@ _POINTS = [
 def restore_session() -> None:
     """Log the user back in from the session token in the URL."""
     if st.session_state.get("user_id"):
+        # Switching pages rewrites the URL without its query string, dropping the
+        # token — so a refresh anywhere but the default page lands on the sign-in
+        # screen even though the session is still valid. Put it back on every run.
+        live = st.session_state.get("token")
+        if live and st.query_params.get(SESSION_QS) != live:
+            st.query_params[SESSION_QS] = live
         return
     token = st.query_params.get(SESSION_QS)
     if not token:
