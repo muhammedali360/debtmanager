@@ -440,7 +440,11 @@ def chart(fig: go.Figure, table: Optional[pd.DataFrame] = None, key: Optional[st
     """
     meta = fig.layout.meta or {}
     with card(key or "chart", meta.get("title", ""), meta.get("subtitle", "")):
-        st.plotly_chart(fig, width="stretch", key=key,
+        # No `width=` here: `st.plotly_chart` has no such parameter, so it fell
+        # through to **kwargs — which are the deprecated way to pass Plotly
+        # config — and printed a deprecation banner above every chart in the
+        # app. Container width is already the default.
+        st.plotly_chart(fig, key=key,
                         config={"displayModeBar": False, "responsive": True})
         if table is not None and not table.empty:
             with st.expander(table_label):
@@ -489,11 +493,24 @@ def build_plan(debts: Sequence[Debt], profile: Profile, **kw):
 
 
 def needs_debts() -> bool:
-    """Guard for pages that can't render without data. Returns True if we bailed."""
-    if not active_debts():
-        st.info("Add your balances on the **My debts** page and this will fill in.")
+    """Guard for pages that can't render without data. Returns True if we bailed.
+
+    A brand-new account gets the quick-add form itself rather than a pointer to
+    another page. The app has nothing to say until it has one balance, so the
+    most useful thing it can do with the empty state is ask for one here.
+    """
+    if active_debts():
+        return False
+    if st.session_state.get("debts"):
+        # Accounts on file, all at zero — that isn't an empty app, it's a win.
+        banner("success", "Every account on file is paid off. Add a new one on **My debts** "
+                          "if something else comes along.")
         return True
-    return False
+    # Imported here rather than at module scope: onboarding builds on these
+    # primitives, so the two modules would import each other.
+    from .onboarding import first_debt
+    first_debt()
+    return True
 
 
 def load_state(user_id: int, force: bool = False) -> tuple[list[Debt], Profile]:

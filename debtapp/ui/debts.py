@@ -2,31 +2,41 @@
 
 from __future__ import annotations
 
+from dataclasses import fields
+
 import pandas as pd
 import streamlit as st
 
 from .. import engine as E
-from ..models import CREDIT_CARD, LOAN_SUBTYPES, TERM_LOAN, Debt
+from ..models import ACCOUNT_TYPES, Debt, kind_for, type_of
 from .common import (banner, caption, current_user, money, page_header, persist, section,
                      stat_row, toast)
 
-# "id" rides along hidden (column_config maps it to None). It is what keeps a
-# card's logged payment history attached to it across renames and edits.
-CARD_COLS = ["id", "name", "balance", "apr", "credit_limit", "min_payment", "min_percent",
-             "current_payment", "due_day"]
-LOAN_COLS = ["id", "name", "subtype", "balance", "apr", "min_payment", "term_months",
-             "current_payment", "due_day"]
+# One grid, not two. Splitting cards from loans made the user classify a debt
+# before entering it, and the classification is ours — see `models.ACCOUNT_TYPES`.
+#
+# "id" rides along hidden (column_config maps it to None). It is what keeps an
+# account's logged payment history attached to it across renames and edits.
+# "type" is synthetic: it is `kind` and `subtype` folded into one question.
+BASIC_COLS = ["id", "name", "type", "balance", "apr", "current_payment"]
+DETAIL_COLS = ["min_payment", "min_percent", "credit_limit", "term_months", "due_day"]
+COLS = BASIC_COLS + DETAIL_COLS
 
+# Everything in COLS that is a field on Debt — i.e. all of it but the synthetic
+# "type" and the "name" handled separately.
+_MODEL_COLS = [c for c in COLS if c not in ("name", "type")]
 _INT_COLS = ("term_months", "due_day")
+# A blank cell means "I didn't say", which is the dataclass default — not zero.
+_DEFAULTS = {f.name: f.default for f in fields(Debt)}
 
 
-def _to_df(debts: list[Debt], kind: str, cols: list[str]) -> pd.DataFrame:
-    rows = [{c: getattr(d, c) for c in cols} for d in debts if d.kind == kind]
-    return pd.DataFrame(rows, columns=cols)
+def _to_df(debts: list[Debt]) -> pd.DataFrame:
+    rows = [{c: (type_of(d) if c == "type" else getattr(d, c)) for c in COLS} for d in debts]
+    return pd.DataFrame(rows, columns=COLS)
 
 
-def _seed(debts: list[Debt], kind: str, cols: list[str], key: str) -> pd.DataFrame:
-    """The frame to hand an editor — deliberately the *same* one on every rerun.
+def _seed(debts: list[Debt], key: str) -> pd.DataFrame:
+    """The frame to hand the editor — deliberately the *same* one on every rerun.
 
     ``st.data_editor`` hashes the data it is given into its own widget id, so
     handing it back the rows we saved a moment ago makes it a *different*
@@ -39,41 +49,49 @@ def _seed(debts: list[Debt], kind: str, cols: list[str], key: str) -> pd.DataFra
     new one when it has no delta to lose — a first render, or a return to the
     page after Streamlit binned its state — or when the rows moved underneath
     it, which the callers that can do that announce by bumping ``debts_rev``,
-    and which shows up here as a widget key it has not seen before.
+    and which shows up here as a widget key it has not seen before. Toggling the
+    detail columns changes the key too, which is safe for the same reason: every
+    edit is already autosaved by the time the toggle can be clicked.
     """
-    slot = f"_seed_{kind}"
-    stash = st.session_state.get(slot)
+    stash = st.session_state.get("_seed_debts")
     if stash is None or stash[0] != key or key not in st.session_state:
-        stash = (key, _to_df(debts, kind, cols))
-        st.session_state[slot] = stash
+        stash = (key, _to_df(debts))
+        st.session_state["_seed_debts"] = stash
     return stash[1]
 
 
-def _from_df(df: pd.DataFrame, kind: str, cols: list[str]) -> list[Debt]:
+def _from_df(df: pd.DataFrame) -> list[Debt]:
     out = []
     for _, r in df.iterrows():
         name = str(r.get("name") or "").strip()
         if not name:
             continue  # a blank row the user hasn't filled in yet
-        vals = {}
-        for c in cols:
+        raw_type = r.get("type")
+        kind, subtype = kind_for(str(raw_type) if pd.notna(raw_type) else "Credit card")
+        vals = {"name": name, "kind": kind, "subtype": subtype}
+        for c in _MODEL_COLS:
             v = r.get(c)
-            if c == "id":
+            if pd.isna(v):
+                # The default, not 0.0. `min_percent` is why this matters: it
+                # defaults to 2%, it *is* the minimum-payment model for a card
+                # (`Debt.required_payment`), and coercing a blank cell to zero
+                # silently removed the floor from every card added after the
+                # first — flattering every projection downstream with a minimum
+                # no lender would accept.
+                vals[c] = _DEFAULTS[c]
+            elif c == "id":
                 # Blank on rows the user just added — those become new records.
-                vals["id"] = int(v) if pd.notna(v) else None
-            elif c in ("name", "subtype"):
-                vals[c] = str(v) if pd.notna(v) else ("Other" if c == "subtype" else name)
+                vals[c] = int(v)
             elif c in _INT_COLS:
-                vals[c] = 0 if pd.isna(v) else int(v)
+                vals[c] = int(v)
             else:
-                vals[c] = 0.0 if pd.isna(v) else float(v)
-        out.append(Debt(kind=kind, **vals))
+                vals[c] = float(v)
+        out.append(Debt(**vals))
     return out
 
 
 def _label(d: Debt) -> str:
-    kind = "Card" if d.kind == CREDIT_CARD else (d.subtype or "Loan")
-    return f"{d.name} — {kind}, {money(d.balance)}"
+    return f"{d.name} — {type_of(d)}, {money(d.balance)}"
 
 
 def _apply(uid: int, debts: list[Debt], profile) -> None:
@@ -97,7 +115,7 @@ def _apply(uid: int, debts: list[Debt], profile) -> None:
 def _manage(uid: int, debts: list[Debt], profile) -> None:
     """Whole-account actions, spelled out.
 
-    The checkboxes down the left of the tables above drive Streamlit's own
+    The checkboxes down the left of the table above drive Streamlit's own
     toolbar, which deletes a row the moment you click it. That is fine for a
     blank row you added by accident and much too quiet for closing an account
     you have payment history against — and it cannot express "this one is paid
@@ -127,7 +145,7 @@ def _manage(uid: int, debts: list[Debt], profile) -> None:
     else:
         # Say what the tick boxes in the tables do, since they look like they
         # should feed this box and don't.
-        caption("Nothing selected. The tick boxes in the tables above work too, but the bin "
+        caption("Nothing selected. The tick boxes in the table above work too, but the bin "
                 "icon there deletes straight away — none of the warnings you get here.")
 
     c1, c2, _ = st.columns([1, 1, 2])
@@ -169,10 +187,49 @@ def _manage(uid: int, debts: list[Debt], profile) -> None:
 
 
 _MONEY = dict(format="dollar", min_value=0.0, step=25.0)
-_DUE_DAY = st.column_config.NumberColumn(
-    "Due day", help="Day of the month this payment is due (1–31). Set it and the app will "
-                    "tell you what's coming up and ask whether you've paid. Leave 0 to skip.",
-    min_value=0, max_value=31, step=1, format="%d")
+
+
+def _columns(details: bool) -> dict:
+    """Column config for the grid. Hidden columns are still *present* in the
+    frame — mapping one to ``None`` hides it without dropping the value, which
+    is what keeps a minimum you set last month from being wiped by a session
+    where you never opened the details."""
+    cfg = {
+        "id": None,
+        "name": st.column_config.TextColumn("Account", required=True, width="medium"),
+        "type": st.column_config.SelectboxColumn(
+            "Type", options=ACCOUNT_TYPES, default="Credit card", required=True,
+            help="Credit cards have a minimum that shrinks as the balance does. Everything "
+                 "else has a fixed payment."),
+        "balance": st.column_config.NumberColumn("Balance", **_MONEY),
+        "apr": st.column_config.NumberColumn("APR", format="%.2f%%", min_value=0.0,
+                                             max_value=99.0, step=0.25),
+        "current_payment": st.column_config.NumberColumn(
+            "You pay now", help="What you actually send each month.", **_MONEY),
+        "min_payment": st.column_config.NumberColumn(
+            "Minimum", help="On a card, the dollar floor — usually $25–$40; the percentage "
+                            "beside it applies too. On a loan, the contractual payment — leave "
+                            "it blank and we'll derive it from the months left.",
+            format="dollar", min_value=0.0, step=5.0),
+        "min_percent": st.column_config.NumberColumn(
+            "Min % (cards)", help="Percentage of the balance the card requires — usually 1–3%. "
+                                  "Blank means 2%.", format="%.1f%%",
+            min_value=0.0, max_value=25.0, step=0.5),
+        "credit_limit": st.column_config.NumberColumn(
+            "Credit limit (cards)", help="Used for utilization only. Leave blank to skip.",
+            **_MONEY),
+        "term_months": st.column_config.NumberColumn(
+            "Months left (loans)", help="Only used if you leave the payment blank.",
+            min_value=0, max_value=480, step=1),
+        "due_day": st.column_config.NumberColumn(
+            "Due day", help="Day of the month this payment is due (1–31). Set it and the app "
+                            "will tell you what's coming and ask whether you've paid.",
+            min_value=0, max_value=31, step=1, format="%d"),
+    }
+    if not details:
+        for c in DETAIL_COLS:
+            cfg[c] = None
+    return cfg
 
 
 def render() -> None:
@@ -184,67 +241,29 @@ def render() -> None:
                 "Everything here saves automatically. Come back any time and your numbers "
                 "will be waiting.")
 
-    # Both editors are keyed by revision so a button below — or a payment logged
-    # on the Ledger — can throw their pending edits away. See `_apply` and
-    # `_seed`: the revision is the one thing that reseeds them.
+    section("Your accounts",
+            "One row each. A name, a balance, the rate and what you pay is enough to project "
+            "every number in the app — the rest sharpens it and can wait.")
+
+    details = st.toggle(
+        "Show payment details", key="debt_details",
+        help="Minimums, credit limits, remaining terms and due dates. Hiding them changes "
+             "nothing you've already entered.")
+
+    # The grid is keyed by revision so a button below — or a payment logged on
+    # the Ledger — can throw its pending edits away. See `_apply` and `_seed`.
     rev = st.session_state.get("debts_rev", 0)
-    cards_key, loans_key = f"ed_cards_{rev}", f"ed_loans_{rev}"
+    grid_key = f"ed_debts_{rev}_{'full' if details else 'basic'}"
 
-    # ----------------------------------------------------------- credit cards
-    section("Credit cards & revolving credit",
-            "Minimums on revolving credit are a *percentage of the balance*, so they shrink as "
-            "you pay — which is exactly why they take so long to clear. Set the percentage and "
-            "the dollar floor from your statement.")
-    cards = st.data_editor(
-        _seed(debts, CREDIT_CARD, CARD_COLS, cards_key),
-        num_rows="dynamic", width="stretch", hide_index=True, key=cards_key,
-        column_config={
-            "name": st.column_config.TextColumn("Card", required=True, width="medium"),
-            "balance": st.column_config.NumberColumn("Balance", **_MONEY),
-            "apr": st.column_config.NumberColumn("APR", format="%.2f%%", min_value=0.0,
-                                                 max_value=99.0, step=0.25),
-            "credit_limit": st.column_config.NumberColumn(
-                "Credit limit", help="Used for utilization. Leave 0 if you'd rather not.",
-                **_MONEY),
-            "min_payment": st.column_config.NumberColumn(
-                "Min ($ floor)", help="The dollar minimum, usually $25–$40.",
-                format="dollar", min_value=0.0, step=5.0),
-            "min_percent": st.column_config.NumberColumn(
-                "Min (% of balance)", help="Usually 1–3%.", format="%.1f%%",
-                min_value=0.0, max_value=25.0, step=0.5),
-            "current_payment": st.column_config.NumberColumn(
-                "You pay now", help="What you actually send each month.", **_MONEY),
-            "due_day": _DUE_DAY,
-            "id": None,
-        },
+    edited = st.data_editor(
+        _seed(debts, grid_key), num_rows="dynamic", width="stretch", hide_index=True,
+        key=grid_key, column_config=_columns(details),
     )
+    if not details:
+        caption("Minimums, credit limits and due dates are hidden. The projections use sensible "
+                "defaults until you set them.")
 
-    # ------------------------------------------------------------ term loans
-    section("Term loans",
-            "Auto, student, personal, mortgage — anything with a fixed monthly payment and an "
-            "end date.")
-    loans = st.data_editor(
-        _seed(debts, TERM_LOAN, LOAN_COLS, loans_key),
-        num_rows="dynamic", width="stretch", hide_index=True, key=loans_key,
-        column_config={
-            "name": st.column_config.TextColumn("Loan", required=True, width="medium"),
-            "subtype": st.column_config.SelectboxColumn("Type", options=LOAN_SUBTYPES,
-                                                        default="Other"),
-            "balance": st.column_config.NumberColumn("Balance owed", **_MONEY),
-            "apr": st.column_config.NumberColumn("APR", format="%.2f%%", min_value=0.0,
-                                                 max_value=99.0, step=0.25),
-            "min_payment": st.column_config.NumberColumn(
-                "Required payment", help="The contractual monthly payment.", **_MONEY),
-            "term_months": st.column_config.NumberColumn(
-                "Months left", help="Optional — used only if you leave the payment at 0.",
-                min_value=0, max_value=480, step=1),
-            "current_payment": st.column_config.NumberColumn("You pay now", **_MONEY),
-            "due_day": _DUE_DAY,
-            "id": None,
-        },
-    )
-
-    new_debts = _from_df(cards, CREDIT_CARD, CARD_COLS) + _from_df(loans, TERM_LOAN, LOAN_COLS)
+    new_debts = _from_df(edited)
 
     # ------------------------------------------------------ account actions
     # After the editors, so it acts on what is on screen right now rather than
@@ -258,22 +277,12 @@ def render() -> None:
     min_budget = E.minimum_budget(new_debts) if new_debts else 0.0
     cur_budget = E.current_budget(new_debts) if new_debts else 0.0
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        budget = st.number_input(
-            "Total you can put toward debt each month", min_value=0.0, step=25.0,
-            value=float(profile.monthly_budget or cur_budget or min_budget),
-            help="Every strategy is compared at this same budget, so the differences you see "
-                 "come from ordering alone.",
-        )
-    with c2:
-        income = st.number_input("Monthly take-home income (optional)", min_value=0.0, step=100.0,
-                                 value=float(profile.monthly_income),
-                                 help="Used for debt-to-income insights. Leave 0 to skip.")
-    with c3:
-        fund = st.number_input("Emergency fund (optional)", min_value=0.0, step=100.0,
-                               value=float(profile.emergency_fund),
-                               help="Cash on hand. Changes what we recommend you do first.")
+    budget = st.number_input(
+        "Total you can put toward debt each month", min_value=0.0, step=25.0,
+        value=float(profile.monthly_budget or cur_budget or min_budget),
+        help="Every strategy is compared at this same budget, so the differences you see "
+             "come from ordering alone.",
+    )
 
     strategy = st.radio(
         "Payoff strategy", [E.AVALANCHE, E.SNOWBALL, E.CUSTOM],
@@ -308,7 +317,21 @@ def render() -> None:
              "This is the money doing the real work", "good" if budget > min_budget else ""),
         ])
     else:
-        st.info("Add a credit card or a loan above to get started.")
+        st.info("Add an account above to get started.")
+
+    # Income and savings drive two suggestions apiece and nothing else, so they
+    # sat on the app's busiest page charging every user for a feature most never
+    # reach. Folded away, not deleted — the suggestions they unlock are good.
+    with st.expander("Income and savings (optional)"):
+        caption("Neither figure changes a projection. They let the app say whether your debt "
+                "load is survivable, and whether to build a cushion before overpaying.")
+        c1, c2 = st.columns(2)
+        income = c1.number_input("Monthly take-home income", min_value=0.0, step=100.0,
+                                 value=float(profile.monthly_income),
+                                 help="Used for debt-to-income suggestions. Leave 0 to skip.")
+        fund = c2.number_input("Emergency fund", min_value=0.0, step=100.0,
+                               value=float(profile.emergency_fund),
+                               help="Cash on hand. Changes what we recommend you do first.")
 
     # ---------------------------------------------------------------- autosave
     profile.monthly_budget = budget

@@ -8,52 +8,32 @@ from __future__ import annotations
 import streamlit as st
 
 from debtapp import db
-from debtapp import engine as E
-from debtapp import payments as P
-from debtapp.ui import account, auth, dashboard, debts, insights_page, ledger, scenarios
-from debtapp.ui.common import (active_debts, build_plan, duration, effective_budget,
-                               esc_html, inject_css, load_state, money, user_payments)
+from debtapp.ui import account, auth, debts, ledger, plan
+from debtapp.ui.common import (active_debts, build_plan, duration, inject_css, load_state,
+                               money)
 
 st.set_page_config(page_title="Debt Manager", page_icon="💸", layout="wide",
                    initial_sidebar_state="expanded")
 
 
 def _sidebar_summary() -> None:
-    """A standing reminder of the two numbers that matter."""
+    """The two numbers, and only the two numbers.
+
+    This used to carry five figures, a strategy note and the next payment due —
+    every one of which the Plan page states again, larger, two inches to the
+    right. A summary that repeats the page it sits beside is not a summary.
+    """
     ds = active_debts()
     if not ds:
         st.sidebar.info("Add your debts to get started.")
         return
-    profile = st.session_state.profile
-    plan = build_plan(ds, profile)
-    total = sum(d.balance for d in ds)
-    daily = sum(d.daily_interest for d in ds)
-
-    st.sidebar.metric("Total owed", money(total))
-    if plan.never_pays_off:
+    schedule = build_plan(ds, st.session_state.profile)
+    st.sidebar.metric("Total owed", money(sum(d.balance for d in ds)))
+    if schedule.never_pays_off:
         st.sidebar.metric("Debt-free", "Never")
-        st.sidebar.error("At this payment level the balance never clears.")
     else:
-        st.sidebar.metric("Debt-free", plan.payoff_date.strftime("%b %Y"),
-                          duration(plan.months), delta_color="off")
-        st.sidebar.metric("Interest you'll pay", money(plan.total_interest),
-                          f"{plan.interest_share:.0%} of every dollar", delta_color="inverse")
-
-    strategy = E.STRATEGY_LABELS[plan.strategy].split("—")[0].strip().lower()
-    note = (f"Costing you <b>{money(daily, cents=True)} a day</b> at "
-            f"{money(effective_budget(ds, profile))}/mo on {esc_html(strategy)}.")
-
-    # The one thing that is actionable today rather than in five years.
-    due = P.actionable(ds, user_payments())
-    if due:
-        head = due[0]
-        more = f" +{len(due) - 1} more due soon." if len(due) > 1 else ""
-        note += (f"<br><br>{P.STATUS_ICON[head.status]} <b>{esc_html(head.name)}</b> — "
-                 f"{money(head.amount)} {esc_html(head.phrase)}.{more}")
-
-    # Written as HTML rather than markdown: two money figures in one string make
-    # Streamlit's markdown read everything between them as LaTeX.
-    st.sidebar.markdown(f'<div class="side-note">{note}</div>', unsafe_allow_html=True)
+        st.sidebar.metric("Debt-free", schedule.payoff_date.strftime("%b %Y"),
+                          duration(schedule.months), delta_color="off")
 
 
 def main() -> None:
@@ -78,22 +58,27 @@ def main() -> None:
     _sidebar_summary()
     st.sidebar.divider()
 
+    # Three pages, because there are three things to do here: decide, record
+    # what you owe, record what you paid. Dashboard, Insights and What-if were
+    # all the same projection and are now one page; Account is settings and is
+    # demoted out of the main list rather than sitting beside them as a peer.
+    #
     # Every page callable is named ``render``, so the URL path has to be given
     # explicitly — Streamlit would otherwise infer "render" for all of them.
-    nav = st.navigation([
-        st.Page(dashboard.render, title="Dashboard", icon=":material/dashboard:",
-                url_path="dashboard", default=True),
-        st.Page(debts.render, title="My debts", icon=":material/credit_card:",
-                url_path="debts"),
-        st.Page(ledger.render, title="Ledger", icon=":material/receipt_long:",
-                url_path="ledger"),
-        st.Page(insights_page.render, title="Insights", icon=":material/lightbulb:",
-                url_path="insights"),
-        st.Page(scenarios.render, title="What if…", icon=":material/timeline:",
-                url_path="scenarios"),
-        st.Page(account.render, title="Account", icon=":material/settings:",
-                url_path="account"),
-    ])
+    nav = st.navigation({
+        "Your debt": [
+            st.Page(plan.render, title="Plan", icon=":material/insights:",
+                    url_path="plan", default=True),
+            st.Page(debts.render, title="My debts", icon=":material/credit_card:",
+                    url_path="debts"),
+            st.Page(ledger.render, title="Ledger", icon=":material/receipt_long:",
+                    url_path="ledger"),
+        ],
+        "Settings": [
+            st.Page(account.render, title="Account", icon=":material/settings:",
+                    url_path="account"),
+        ],
+    })
 
     if st.sidebar.button("Sign out", width="stretch"):
         auth.sign_out()

@@ -53,9 +53,9 @@ class Insight:
     # True only when acting on *this* insight puts roughly `stake` dollars back
     # in the user's pocket. Set it False whenever `stake` is a ranking proxy —
     # money already spent, a total that measures how bad the situation is, or a
-    # credit-score effect priced in dollars. The Insights page adds up only the
-    # recoverable ones, so a loose flag here turns into a headline figure the
-    # app cannot stand behind.
+    # credit-score effect priced in dollars. Anything that totals these adds up
+    # only the recoverable ones, so a loose flag here turns into a headline
+    # figure the app cannot stand behind.
     recoverable: bool = True
 
     @property
@@ -572,8 +572,8 @@ def _extra_payments(debts, budget, strategy, order, plan) -> list[Insight]:
         action=f"Set up an automatic {label} transfer on payday so it leaves before you can "
                "spend it.",
         metric=money(saved),
-        # The headlined rung, not the largest: `stake` is what the Insights page
-        # quotes back, so it has to be the same number the card's title claims.
+        # The headlined rung, not the largest: `stake` is what ranks the card and
+        # gets quoted back, so it has to be the number the title already claims.
         stake=saved,
     )]
 

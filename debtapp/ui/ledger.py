@@ -68,7 +68,7 @@ def log_payment(debt: Debt, amount: float, when: date, interest: Optional[float]
 def due_panel(heading: str = "Payments coming up", limit: Optional[int] = None) -> bool:
     """Render due/overdue accounts with a one-click way to confirm payment.
 
-    Returns True if anything was drawn. Shared with the dashboard so the prompt
+    Returns True if anything was drawn. Shared with the Plan page so the prompt
     is wherever the user already is, rather than on a page they have to think
     to visit.
     """
@@ -138,10 +138,20 @@ def _history_table(ordered: list) -> pd.DataFrame:
     } for p in ordered])
 
 
-def _log_form(debts: list[Debt]) -> None:
-    section("Log a payment",
-            "Backfill anything you've already sent — the ledger is only as useful as it is "
-            "complete.")
+def _log_form(debts: list[Debt], expanded: bool = False) -> None:
+    """Backfill.
+
+    Folded away, because it is the slow path: this asks six questions and the
+    due panel at the top of the page logs the same payment in one field and one
+    click. It opens by default only when there is nothing in the ledger yet, and
+    so nothing for the due panel to be better than.
+    """
+    with st.expander("Log an older payment", expanded=expanded):
+        _log_fields(debts)
+
+
+def _log_fields(debts: list[Debt]) -> None:
+    caption("Anything you've already sent — the ledger is only as useful as it is complete.")
     # Account and date sit outside the form: widgets inside a form don't rerun
     # until submit, and the balance question below has to follow the date.
     left, right = st.columns(2)
@@ -206,7 +216,7 @@ def render() -> None:
         st.info("No payments logged yet. Record one below — after two or three months this page "
                 "will show you exactly what your debt has cost you in real dollars.")
         if debts:
-            _log_form(debts)
+            _log_form(debts, expanded=True)
         return
 
     # --------------------------------------------------------------- counters

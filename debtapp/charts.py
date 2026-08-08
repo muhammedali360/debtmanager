@@ -299,7 +299,7 @@ def ledger_cumulative(cum: pd.DataFrame, dark: bool) -> go.Figure:
 
     Everything else in the app projects forward; this is recorded history. The
     title and subtitle say so outright, because an area chart that looks like
-    the dashboard's but means something else is how a user stops trusting both.
+    the Plan page's but means something else is how a user stops trusting both.
     """
     p = palette(dark)
     if cum.empty:

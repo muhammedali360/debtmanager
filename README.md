@@ -5,12 +5,18 @@ where the money is going, and find out what it would actually take to get out.
 
 ## What it does
 
+- **Three pages.** *Plan* (what you owe, what to do next, when it ends), *My
+  debts* (one grid), *Ledger* (what you actually paid). Account settings sit
+  below those, out of the way.
 - **Two debt shapes, modelled properly.** Credit cards use a percent-of-balance
   minimum with a dollar floor — so the minimum *shrinks as you pay*, which is the
-  trap. Term loans use a fixed contractual payment.
+  trap. Term loans use a fixed contractual payment. The user never declares
+  which is which: they pick a **type** (Credit card, Auto, Student, Mortgage…)
+  and `models.kind_for` maps it, because the card/loan split is our modelling
+  distinction and not a question anyone should answer before typing a balance.
 - **A real amortization engine.** One code path (`debtapp/engine.py`) produces
-  every number in the app, so the dashboard, insights, and scenarios can never
-  disagree. Validated against closed-form amortization tables.
+  every number in the app, so nothing on screen can disagree with anything else.
+  Validated against closed-form amortization tables.
 - **Due dates and a payment ledger.** Give each account the day of the month it's
   due and the app tracks the calendar: what's coming up, what's past due, and a
   one-click *"I paid this"* that records the payment and reduces the balance.
@@ -23,18 +29,22 @@ where the money is going, and find out what it would actually take to get out.
   ledger's actual-payments history. Each one sits on its own card with the title
   in the card header — Plotly lays a title and a horizontal legend into the same
   strip of top margin, so a chart that draws its own title crowds its legend.
+  Only the projection is on the page by default; the rest are under *More
+  detail*, because four of them restate what the tiles already say in words.
 - **~15 quantified insights**, ranked by dollars at stake — overdue payments and
   what a miss really costs, balance transfers net of fees, consolidation,
   utilization and its credit-score cost, debt-to-income, extra payments (one
   card with a ladder of tiers, not one card per tier), windfall timing, the cost
   of waiting six months.
 
-  Each card carries a `recoverable` flag, and the page totals only the insights
-  where it is true. A stake like "minimums would cost you $77,876" ranks its
-  card but is not money any action recovers, and the page must not add it to a
-  savings figure.
-- **What-if sandbox**: extra payments, lump sums, annual raises, and a solver
-  that works backwards from a target debt-free date to the payment it requires.
+  The Plan page shows the **top one** and folds the rest into a drawer. Ranking
+  by dollars is only worth something if the ranking is allowed to decide what
+  you read first; a wall of twenty cards spends it. Each card also carries a
+  `recoverable` flag for anywhere that totals them — a stake like "minimums
+  would cost you $77,876" ranks its card but is not money any action recovers.
+- **One what-if lever**: how much extra per month, priced in months saved and
+  interest saved. This replaced six sliders and a target-date solver that all
+  asked the same question in units most people cannot act on this month.
 - **Accounts and persistence** so you can come back and pick up where you left
   off, plus a progress chart across check-ins. Closing an account is its own
   decision rather than a cell edit: pick accounts on **My debts** and either
@@ -83,7 +93,9 @@ streamlit run app.py
 ```
 
 Create an account on first load. Tick "start with example debts" to get a
-realistic portfolio you can edit.
+realistic portfolio you can edit; leave it unticked and the app asks you for one
+account — name, type, balance, rate, payment — and projects it live as you type,
+before you save anything.
 
 ## Tests
 
@@ -92,13 +104,14 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-217 tests: engine math against closed-form amortization answers, insight
+227 tests: engine math against closed-form amortization answers, insight
 correctness, due-date arithmetic (month-end clamping, leap years, paid-early vs
 not-yet-paid), ledger aggregation and persistence, the full auth surface
 (policy, throttling, session expiry, recovery codes), and end-to-end UI tests
 that drive every page and the login screen through Streamlit's `AppTest` —
-including empty accounts, zero-APR loans, negative-amortization plans, and
-payments left orphaned by a deleted account.
+including empty accounts, zero-APR loans, negative-amortization plans, payments
+left orphaned by a deleted account, the first-run quick-add, and the grid's
+blank-cell handling.
 
 ## Persistence and deployment
 
@@ -129,10 +142,22 @@ them, and the pool revalidates on checkout; otherwise the first request after an
 idle spell gets handed a dead socket.
 
 Set `DEBTMANAGER_TEST_DB` to a Postgres URL to run the suite against Postgres
-instead of SQLite. All 217 tests pass on both.
+instead of SQLite. All 227 tests pass on both.
 
 ## Design notes
 
+- **A blank cell means "I didn't say", not zero.** `ui/debts._from_df` fills an
+  empty numeric cell from the dataclass default rather than coercing it to 0.0.
+  `min_percent` is why this matters: it defaults to 2%, and it *is* the
+  minimum-payment model for a card (`Debt.required_payment` takes the larger of
+  the dollar floor and the percentage). Coercing blanks to zero silently deleted
+  that floor from every card added without opening the payment details, and the
+  only symptom was a projection that was too optimistic.
+- **The optional fields are optional in the layout too.** The debts grid shows
+  five columns; minimums, credit limits, terms and due dates are behind a
+  toggle, and income and savings are behind an expander. Hidden columns stay
+  *in the dataframe* and are hidden by `column_config` rather than dropped, so a
+  session spent in the basic view cannot overwrite a minimum set months ago.
 - **Money math** is monthly-compounded and rounded to the cent each month, the
   way a servicer actually posts. A 60-month loan can therefore end with a
   sub-dollar 61st stub payment — that is correct, not a bug.
@@ -173,7 +198,11 @@ debtapp/
   db.py                persistence (SQLite or Postgres), bcrypt auth, sessions
   _pools.py            Postgres connection pools, one per DSN
   ui/common.py         the stylesheet + layout primitives every page builds from
-  ui/                  one module per page
+  ui/plan.py           tiles, top suggestion, projection, one what-if lever
+  ui/debts.py          the one grid + the monthly plan
+  ui/ledger.py         due panel + recorded payments
+  ui/onboarding.py     first run: one account, projected live
+  ui/                  account settings and the auth screens
 tests/                 engine, insight, and end-to-end UI tests
 tools/screenshot.mjs   browser pass: screenshots + markup-leak check
 ```
