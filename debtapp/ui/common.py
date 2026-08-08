@@ -170,6 +170,7 @@ def inject_css() -> None:
         font-size: 12.5px; line-height: 1.5; color: {p['text_secondary']};
         margin: 0 0 4px; max-width: 78ch;
     }}
+    .stApp p.table-title {{ margin-top: 4px; }}
     /* The plot's own top margin holds the legend; the header owns the space
        above it, so the two can never be laid out into the same strip. */
     [class*="st-key-card-"] .stPlotlyChart {{ margin-top: 6px; }}
@@ -187,8 +188,14 @@ def inject_css() -> None:
         border: 1px solid {p['border']}; border-radius: 10px;
         background: {p['surface']};
     }}
+    /* The "view as table" drawer lives inside a white chart card, and the table
+       it opens is also white. Tint the drawer back down to the canvas so the
+       dataframe reads as a surface rather than dissolving into the card. */
     [class*="st-key-card-"] [data-testid="stExpander"] details {{
         border-color: transparent; background: transparent;
+    }}
+    [class*="st-key-card-"] [data-testid="stExpander"] details[open] {{
+        background: {p['canvas']}; border-color: {p['border']};
     }}
     [data-testid="stExpander"] summary {{ font-size: 13px; color: {p['text_secondary']}; }}
     [data-testid="stExpander"] summary:hover {{ color: {p['principal']}; }}
@@ -395,9 +402,18 @@ def chart(fig: go.Figure, table: Optional[pd.DataFrame] = None, key: Optional[st
 
 
 def table(df: pd.DataFrame, key: str, title: str = "", subtitle: str = "", **kw):
-    """A standalone dataframe on its own surface, so it never blends into the page."""
-    with card(key, title, subtitle):
-        return st.dataframe(df, width="stretch", hide_index=True, key=f"tbl-{key}", **kw)
+    """A dataframe with a heading, sitting directly on the canvas.
+
+    Deliberately *not* wrapped in a card. Streamlit paints dataframe cells with
+    ``theme.backgroundColor``, which is the surface white, so a table inside a
+    white card is white-on-white and reads as no table at all. The dataframe is
+    itself the raised plane; it belongs on the canvas, not on another surface.
+    """
+    if title:
+        sub = f'<p class="card-sub">{esc_html(subtitle)}</p>' if subtitle else ""
+        st.markdown(f'<p class="card-title table-title">{esc_html(title)}</p>{sub}',
+                    unsafe_allow_html=True)
+    return st.dataframe(df, width="stretch", hide_index=True, key=f"tbl-{key}", **kw)
 
 
 # ------------------------------------------------------------------- app state
