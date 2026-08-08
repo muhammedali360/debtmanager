@@ -36,7 +36,12 @@ where the money is going, and find out what it would actually take to get out.
 - **What-if sandbox**: extra payments, lump sums, annual raises, and a solver
   that works backwards from a target debt-free date to the payment it requires.
 - **Accounts and persistence** so you can come back and pick up where you left
-  off, plus a progress chart across check-ins.
+  off, plus a progress chart across check-ins. Closing an account is its own
+  decision rather than a cell edit: pick accounts on **My debts** and either
+  mark them paid off — balance and payment to zero, history kept, gone from
+  every projection — or remove them outright behind a confirmation. Removing
+  never touches the ledger, because what a card already cost you is a fact
+  about your past, not about whether you still hold the card.
 
 ## Authentication
 

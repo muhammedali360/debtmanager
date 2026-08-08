@@ -278,6 +278,11 @@ def inject_css() -> None:
     .stMultiSelect [data-baseweb="select"] > div {{
         background-color: {p['surface']};
     }}
+    /* Chips in a multiselect are capped at 128px, which cuts every label the app
+       puts in one — account names carry their type and balance — down to about
+       a word and a half. There are only ever a handful of them, so let them
+       size to their text. */
+    .stMultiSelect [data-baseweb="tag"] span {{ max-width: none; }}
     .stSlider, .stRadio {{ padding-top: 2px; }}
     [data-testid="stAlert"] {{ border-radius: 10px; }}
     [data-testid="stAlert"] p {{ font-size: 14px; line-height: 1.58; }}

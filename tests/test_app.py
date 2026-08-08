@@ -114,6 +114,88 @@ def test_debts_page_edits_persist_to_the_database(user):
     assert db.load_profile(uid).monthly_budget == 2_000.0
 
 
+# ------------------------------------------------- acting on whole accounts
+
+def _pick(at, name: str):
+    """Select one account in the debts page's account picker."""
+    ms = at.multiselect(key="manage_pick_0")
+    i = next(n for n, o in enumerate(ms.options) if o.startswith(name))
+    return ms.set_value([i])
+
+
+def test_removing_an_account_needs_a_confirmation_first(user):
+    """One click must not be able to delete an account outright — that is the
+    behaviour of the table's own trash icon, and the reason this exists."""
+    uid, db = user
+    at = _page("debtapp.ui.debts", uid, db)
+    _pick(at, "Store card").run(timeout=60)
+    at.button(key="ask_remove").click().run(timeout=60)
+    assert not at.exception
+
+    assert any("cannot be undone" in w.value for w in at.warning), "no confirmation shown"
+    assert {d.name for d in db.load_debts(uid)} == {"Chase", "Store card", "Car loan"}
+
+    at.button(key="cancel_remove").click().run(timeout=60)
+    assert {d.name for d in db.load_debts(uid)} == {"Chase", "Store card", "Car loan"}
+
+
+def test_confirming_a_removal_deletes_the_account_but_keeps_its_payments(user):
+    uid, db = user
+    _log(db, uid, "Store card", 40.0, TODAY)
+
+    at = _page("debtapp.ui.debts", uid, db)
+    _pick(at, "Store card").run(timeout=60)
+    at.button(key="ask_remove").click().run(timeout=60)
+    at.button(key="do_remove").click().run(timeout=60)
+    assert not at.exception
+
+    assert {d.name for d in db.load_debts(uid)} == {"Chase", "Car loan"}
+    # The ledger is history, not projection: closing the account must not erase
+    # what it already cost.
+    (payment,) = db.load_payments(uid)
+    assert payment.debt_name == "Store card"
+    assert payment.debt_id is None
+
+
+def test_removing_an_account_drops_it_from_a_custom_payoff_order(user):
+    uid, db = user
+    db.save_profile(uid, Profile(monthly_budget=1_250, strategy="custom",
+                                 custom_order=["Store card", "Chase", "Car loan"]))
+    at = _page("debtapp.ui.debts", uid, db)
+    _pick(at, "Store card").run(timeout=60)
+    at.button(key="ask_remove").click().run(timeout=60)
+    at.button(key="do_remove").click().run(timeout=60)
+    assert not at.exception
+    assert db.load_profile(uid).custom_order == ["Chase", "Car loan"]
+
+
+def test_marking_an_account_paid_off_zeroes_the_payment_too(user):
+    """A zero balance still carrying a payment would keep spending budget on an
+    account that no longer exists."""
+    uid, db = user
+    at = _page("debtapp.ui.debts", uid, db)
+    _pick(at, "Store card").run(timeout=60)
+    at.button(key="mark_paid").click().run(timeout=60)
+    assert not at.exception
+
+    after = next(d for d in db.load_debts(uid) if d.name == "Store card")
+    assert after.balance == 0.0
+    assert after.current_payment == 0.0
+    assert len(db.load_debts(uid)) == 3, "paying off must not delete the account"
+
+
+def test_the_account_actions_stay_out_of_the_way_until_something_is_picked(user):
+    uid, db = user
+    at = _page("debtapp.ui.debts", uid, db)
+    idle = {b.key: b.disabled for b in at.button if b.key in ("mark_paid", "ask_remove")}
+    assert idle == {"mark_paid": True, "ask_remove": True}
+    assert not any(b.key in ("do_remove", "cancel_remove") for b in at.button)
+
+    _pick(at, "Chase").run(timeout=60)
+    live = {b.key: b.disabled for b in at.button if b.key in ("mark_paid", "ask_remove")}
+    assert live == {"mark_paid": False, "ask_remove": False}
+
+
 def test_a_never_paying_plan_does_not_crash_any_page(user):
     """Negative amortization is the nastiest input; every page must survive it."""
     uid, db = user
