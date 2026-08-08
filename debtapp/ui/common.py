@@ -36,8 +36,25 @@ __all__ = ["is_dark", "inject_css", "stat_row", "chart", "money", "duration", "e
 
 
 def is_dark() -> bool:
+    """The mode the app is actually being painted in.
+
+    Read from config, deliberately, because that is the same file Streamlit
+    reads for everything it paints itself — body text, the sidebar, dataframe
+    cells, widget fills — and ``[theme]`` is a single static set of colours with
+    no per-mode variant. The stylesheet has to agree with it or the two fight.
+
+    This used to read ``st.context.theme.type``, which reports the *browser's*
+    preference rather than the theme in force, and which is not stable across
+    reruns: on the first run of a session it returned "dark", so the canvas was
+    painted near-black underneath Streamlit's near-black body text and a white
+    sidebar, then flipped to light on the next rerun. Hence "randomly flipping
+    between dark and light".
+
+    Flipping the app to dark means changing ``base`` *and* the colours in
+    ``.streamlit/config.toml``; this follows automatically.
+    """
     try:
-        return (st.context.theme.type or "light") == "dark"
+        return (st.get_option("theme.base") or "light").lower() == "dark"
     except Exception:
         return False
 
@@ -195,7 +212,7 @@ def inject_css() -> None:
         border-color: transparent; background: transparent;
     }}
     [class*="st-key-card-"] [data-testid="stExpander"] details[open] {{
-        background: {p['canvas']}; border-color: {p['border']};
+        background: {p['canvas']}; border: 1px solid {p['border']}; margin-top: 6px;
     }}
     [data-testid="stExpander"] summary {{ font-size: 13px; color: {p['text_secondary']}; }}
     [data-testid="stExpander"] summary:hover {{ color: {p['principal']}; }}
@@ -254,6 +271,17 @@ def inject_css() -> None:
 
     /* ------------------------------------------------------------- sidebar */
     [data-testid="stSidebar"] {{ border-right: 1px solid {p['border']}; }}
+    /* The collapse/expand chevron ships as a 60%-opacity glyph with no fill, so
+       it is hard to pick out against anything but a plain white panel. Give it
+       full-strength ink and a hover chip. */
+    [data-testid="stSidebarCollapseButton"] button,
+    [data-testid="stExpandSidebarButton"] button {{
+        color: {p['text_secondary']}; opacity: 1;
+    }}
+    [data-testid="stSidebarCollapseButton"] button:hover,
+    [data-testid="stExpandSidebarButton"] button:hover {{
+        color: {p['text']}; background: {p['raised']};
+    }}
     [data-testid="stSidebarNav"] {{ padding-top: 0.4rem; }}
     .side-brand {{
         display: flex; align-items: center; gap: 9px;
