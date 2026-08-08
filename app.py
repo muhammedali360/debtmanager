@@ -53,6 +53,11 @@ def main() -> None:
             auth.render()
         return
 
+    # Straight after signup, make the user acknowledge their recovery codes —
+    # they are the only way back in and are shown exactly once.
+    if auth.render_recovery_codes_gate():
+        return
+
     load_state(st.session_state.user_id)
 
     st.sidebar.markdown("## 💸 Debt Manager")

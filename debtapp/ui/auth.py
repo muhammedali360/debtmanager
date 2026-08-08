@@ -1,13 +1,22 @@
-"""Sign in / sign up screen."""
+"""Sign in / sign up / recover.
+
+Session tokens live in the URL query string because Streamlit has no
+first-party way to set a cookie. That is a real tradeoff — a URL can leak via
+history, referrers, or a shared link — so it is mitigated rather than ignored:
+only the token's *hash* is stored server-side, sessions expire on both an
+absolute and an idle clock, "keep me signed in" is opt-in and short by default,
+and signing out revokes the token immediately.
+"""
 
 from __future__ import annotations
 
 import streamlit as st
 
-from .. import db
+from .. import db, security
 from ..models import CREDIT_CARD, TERM_LOAN, Debt, Profile
 
 SESSION_QS = "s"  # query-param key holding the session token
+_STRENGTH_TONE = {0: "🔴", 1: "🔴", 2: "🟡", 3: "🟢", 4: "🟢"}
 
 
 def restore_session() -> None:
@@ -22,15 +31,16 @@ def restore_session() -> None:
         st.session_state.user_id = uid
         st.session_state.token = token
     else:
+        # Expired or revoked — clear it so the stale token stops being echoed.
         del st.query_params[SESSION_QS]
 
 
-def _sign_in(uid: int) -> None:
-    token = db.start_session(uid)
+def _sign_in(uid: int, remember: bool = True) -> None:
+    token = db.start_session(uid, remember=remember)
     st.session_state.user_id = uid
     st.session_state.token = token
     st.query_params[SESSION_QS] = token
-    for k in ("debts", "profile"):
+    for k in ("debts", "profile", "_saved_sig"):
         st.session_state.pop(k, None)
     st.rerun()
 
@@ -61,44 +71,127 @@ def _seed_demo(uid: int) -> None:
                                  emergency_fund=1_800, strategy="avalanche"))
 
 
+def _password_feedback(pw: str, email: str = "") -> None:
+    """Live strength meter. Guidance while typing beats a rejection on submit."""
+    if not pw:
+        return
+    score, label = security.password_strength(pw)
+    st.progress(score / 4, text=f"{_STRENGTH_TONE[score]} {label}")
+    for problem in security.password_problems(pw, email)[:2]:
+        st.caption(f"• {problem}")
+
+
+def _show_recovery_codes(codes: list[str]) -> None:
+    st.session_state.fresh_codes = codes
+
+
+def render_recovery_codes_gate() -> bool:
+    """After signup, make the user acknowledge their codes before continuing.
+
+    Returns True if the gate is showing (caller should render nothing else).
+    """
+    codes = st.session_state.get("fresh_codes")
+    if not codes:
+        return False
+
+    st.success("Account created.")
+    st.markdown("### Save your recovery codes")
+    st.warning(
+        "There is no email server here, so **these codes are the only way back into your "
+        "account** if you forget your password. Each one works once. Store them somewhere "
+        "other than this browser — you will not see them again."
+    )
+    st.code("\n".join(codes), language=None)
+    st.download_button("Download codes", "\n".join(codes),
+                       file_name="debt-manager-recovery-codes.txt", mime="text/plain")
+    if st.checkbox("I've saved these somewhere safe"):
+        if st.button("Continue to my dashboard", type="primary"):
+            del st.session_state.fresh_codes
+            st.rerun()
+    return True
+
+
 def render() -> None:
     st.markdown("## Debt Manager")
     st.caption("See exactly where your money is going — and what it would take to get out.")
 
-    tab_in, tab_up = st.tabs(["Sign in", "Create account"])
+    tab_in, tab_up, tab_reset = st.tabs(["Sign in", "Create account", "Forgot password"])
 
+    # -------------------------------------------------------------- sign in
     with tab_in:
         with st.form("signin"):
             email = st.text_input("Email", key="in_email", autocomplete="username")
             pw = st.text_input("Password", type="password", key="in_pw",
                                autocomplete="current-password")
+            remember = st.checkbox(
+                "Keep me signed in on this device", value=False,
+                help="Leave this off on a shared computer — the sign-in link is held in "
+                     "the page URL.",
+            )
             if st.form_submit_button("Sign in", type="primary", width="stretch"):
                 try:
-                    _sign_in(db.verify_user(email, pw))
+                    _sign_in(db.verify_user(email, pw), remember=remember)
+                except db.RateLimited as e:
+                    st.error(str(e))
+                except db.AuthError as e:
+                    st.error(str(e))
+                    left = db.attempts_remaining(email)
+                    if 0 < left <= 2:
+                        st.warning(f"{left} attempt{'s' if left != 1 else ''} left before "
+                                   "this email is locked for 15 minutes.")
+
+    # --------------------------------------------------------- create account
+    with tab_up:
+        email_up = st.text_input("Email", key="up_email", autocomplete="username")
+        pw_up = st.text_input("Password", type="password", key="up_pw",
+                              autocomplete="new-password",
+                              help=f"At least {security.MIN_LENGTH} characters. A memorable "
+                                   "passphrase of a few words beats a short cryptic one.")
+        _password_feedback(pw_up, email_up)
+        pw2 = st.text_input("Confirm password", type="password", key="up_pw2",
+                            autocomplete="new-password")
+        demo = st.checkbox("Start with example debts I can edit", value=True)
+
+        if st.button("Create account", type="primary", width="stretch", key="do_signup"):
+            if pw_up != pw2:
+                st.error("The two passwords don't match.")
+            else:
+                try:
+                    uid = db.create_user(email_up, pw_up)
+                    if demo:
+                        _seed_demo(uid)
+                    _show_recovery_codes(db.issue_recovery_codes(uid))
+                    _sign_in(uid, remember=False)
                 except db.AuthError as e:
                     st.error(str(e))
 
-    with tab_up:
-        with st.form("signup"):
-            email = st.text_input("Email", key="up_email", autocomplete="username")
-            pw = st.text_input("Password", type="password", key="up_pw",
-                               help="At least 8 characters.", autocomplete="new-password")
-            pw2 = st.text_input("Confirm password", type="password", key="up_pw2",
-                                autocomplete="new-password")
-            demo = st.checkbox("Start with example debts I can edit", value=True)
-            if st.form_submit_button("Create account", type="primary", width="stretch"):
-                if pw != pw2:
+    # ------------------------------------------------------------- recovery
+    with tab_reset:
+        st.caption("Use one of the recovery codes you saved when you signed up. "
+                   "Each code works once.")
+        with st.form("reset"):
+            email_r = st.text_input("Email", key="rs_email", autocomplete="username")
+            code = st.text_input("Recovery code", key="rs_code", placeholder="ABCDE-12345")
+            new_pw = st.text_input("New password", type="password", key="rs_pw",
+                                   autocomplete="new-password")
+            new_pw2 = st.text_input("Confirm new password", type="password", key="rs_pw2",
+                                    autocomplete="new-password")
+            if st.form_submit_button("Reset password", type="primary", width="stretch"):
+                if new_pw != new_pw2:
                     st.error("The two passwords don't match.")
                 else:
                     try:
-                        uid = db.create_user(email, pw)
-                        if demo:
-                            _seed_demo(uid)
-                        _sign_in(uid)
+                        uid = db.reset_password_with_code(email_r, code, new_pw)
+                        st.success("Password reset. You can sign in now — every other "
+                                   "session has been signed out.")
+                        st.info(f"You have **{db.unused_recovery_code_count(uid)}** unused "
+                                "recovery codes left. Generate a fresh set from the Account "
+                                "page once you're back in.")
                     except db.AuthError as e:
                         st.error(str(e))
 
     st.caption(
-        "Your data is stored locally in this app's database and is only used to compute your "
-        "projections. Passwords are hashed with bcrypt — nothing is sent anywhere else."
+        "Your data is stored in this app's database and is only used to compute your "
+        "projections. Passwords are hashed with bcrypt and session tokens are stored hashed — "
+        "nothing is sent anywhere else."
     )

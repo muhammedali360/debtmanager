@@ -128,3 +128,123 @@ def test_zero_apr_and_zero_balance_rows_are_survivable(user):
     for page in PAGES:
         at = _page(page, uid, db)
         assert not at.exception, f"{page} crashed on zero-APR / zero-balance input"
+
+
+# --------------------------------------------------------------- the login screen
+
+def _auth_screen(tmp_path, monkeypatch):
+    """Render the real sign-in / sign-up / recovery page."""
+    monkeypatch.setenv("DEBTMANAGER_DB", str(tmp_path / "auth_ui.db"))
+    import debtapp.db as db
+    importlib.reload(db)
+    db.init_db()
+
+    def script():
+        import streamlit as st
+        from debtapp import db as d
+        from debtapp.ui import auth
+        from debtapp.ui.common import inject_css
+        d.init_db()
+        inject_css()
+        auth.restore_session()
+        if st.session_state.get("user_id"):
+            if not auth.render_recovery_codes_gate():
+                st.markdown("SIGNED_IN")
+        else:
+            auth.render()
+
+    return AppTest.from_function(script).run(timeout=60), db
+
+
+def test_login_screen_renders(tmp_path, monkeypatch):
+    at, _ = _auth_screen(tmp_path, monkeypatch)
+    assert not at.exception
+    body = " ".join(m.value for m in at.markdown)
+    assert "Debt Manager" in body
+
+
+def test_signup_creates_the_account_and_gates_on_recovery_codes(tmp_path, monkeypatch):
+    at, db = _auth_screen(tmp_path, monkeypatch)
+    at.text_input(key="up_email").set_value("new@user.com")
+    at.text_input(key="up_pw").set_value("correct-horse-battery")
+    at.text_input(key="up_pw2").set_value("correct-horse-battery")
+    at.button(key="do_signup").click().run(timeout=60)
+
+    assert not at.exception
+    assert db.verify_user("new@user.com", "correct-horse-battery")
+    # The user must see their codes before reaching the app.
+    body = " ".join(m.value for m in at.markdown)
+    assert "recovery codes" in body.lower()
+    assert "SIGNED_IN" not in body
+
+
+def test_signup_rejects_a_weak_password_in_the_ui(tmp_path, monkeypatch):
+    at, db = _auth_screen(tmp_path, monkeypatch)
+    at.text_input(key="up_email").set_value("weak@user.com")
+    at.text_input(key="up_pw").set_value("password123")
+    at.text_input(key="up_pw2").set_value("password123")
+    at.button(key="do_signup").click().run(timeout=60)
+
+    assert not at.exception
+    assert at.error, "expected a visible error"
+    with pytest.raises(db.AuthError):
+        db.verify_user("weak@user.com", "password123")
+
+
+def test_signup_rejects_mismatched_passwords(tmp_path, monkeypatch):
+    at, _ = _auth_screen(tmp_path, monkeypatch)
+    at.text_input(key="up_email").set_value("mm@user.com")
+    at.text_input(key="up_pw").set_value("correct-horse-battery")
+    at.text_input(key="up_pw2").set_value("different-horse-battery")
+    at.button(key="do_signup").click().run(timeout=60)
+    assert any("don't match" in e.value for e in at.error)
+
+
+def test_signing_in_with_a_bad_password_shows_an_error(tmp_path, monkeypatch):
+    at, db = _auth_screen(tmp_path, monkeypatch)
+    db.create_user("real@user.com", "correct-horse-battery")
+    at.text_input(key="in_email").set_value("real@user.com")
+    at.text_input(key="in_pw").set_value("wrong-horse-battery")
+    at.button[0].click().run(timeout=60)
+    assert not at.exception
+    assert any("Incorrect" in e.value for e in at.error)
+
+
+def test_a_valid_session_token_in_the_url_restores_the_login(tmp_path, monkeypatch):
+    """The whole point of persistence: refresh the page, stay signed in."""
+    at, db = _auth_screen(tmp_path, monkeypatch)
+    uid = db.create_user("back@user.com", "correct-horse-battery")
+    token = db.start_session(uid)
+
+    at.query_params["s"] = token
+    at.run(timeout=60)
+    assert not at.exception
+    assert "user_id" in at.session_state and at.session_state["user_id"] == uid
+
+
+def test_a_revoked_session_token_does_not_restore_the_login(tmp_path, monkeypatch):
+    at, db = _auth_screen(tmp_path, monkeypatch)
+    uid = db.create_user("gone@user.com", "correct-horse-battery")
+    token = db.start_session(uid)
+    db.end_session(token)
+
+    at.query_params["s"] = token
+    at.run(timeout=60)
+    assert not at.exception
+    assert "user_id" not in at.session_state
+    assert "s" not in at.query_params  # stale token cleared from the URL
+
+
+def test_recovery_flow_resets_the_password_from_the_ui(tmp_path, monkeypatch):
+    at, db = _auth_screen(tmp_path, monkeypatch)
+    uid = db.create_user("lost@user.com", "correct-horse-battery")
+    code = db.issue_recovery_codes(uid)[0]
+
+    at.text_input(key="rs_email").set_value("lost@user.com")
+    at.text_input(key="rs_code").set_value(code)
+    at.text_input(key="rs_pw").set_value("brand-new-passphrase")
+    at.text_input(key="rs_pw2").set_value("brand-new-passphrase")
+    at.button[2].click().run(timeout=60)  # the reset form's submit
+
+    assert not at.exception
+    assert db.verify_user("lost@user.com", "brand-new-passphrase") == uid

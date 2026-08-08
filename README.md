@@ -22,6 +22,37 @@ where the money is going, and find out what it would actually take to get out.
 - **Accounts and persistence** so you can come back and pick up where you left
   off, plus a progress chart across check-ins.
 
+## Authentication
+
+- **bcrypt** password hashing, with a **timing decoy** so a non-existent email
+  costs the same as a real one — otherwise response time enumerates your users.
+- **Throttling**: 5 failed attempts locks that email for 15 minutes, and the
+  lockout applies to *unregistered* emails too (throttling only real accounts
+  would itself reveal which addresses exist). A correct password clears the
+  strikes so a user isn't locked out by their own typos.
+- **Password policy** in `security.py`: 10-character minimum, a blocklist of
+  the passwords that actually appear in credential-stuffing lists, and rejection
+  of keyboard runs, repeated characters, and passwords containing your email.
+  Length is weighted over symbol soup, because that is the habit worth pushing.
+  Passwords over bcrypt's 72-byte limit are rejected rather than silently
+  truncated.
+- **Sessions** are opaque 256-bit tokens; only their SHA-256 hash is stored, so
+  a leaked database yields no replayable logins. They expire on both an absolute
+  clock (30 days) and an idle clock (7 days), and "keep me signed in" is opt-in
+  — unchecked gives you 12 hours. Changing your password revokes every session.
+- **Recovery codes** — eight single-use codes issued at signup, stored hashed.
+  There is no mail server here, so these are the entire account-recovery story
+  and the app makes you acknowledge them before it lets you in.
+- **Sign-in history** on the Account page, so a user can spot attempts they
+  don't recognise.
+
+> **Known tradeoff:** the session token lives in the URL query string, because
+> Streamlit has no first-party way to set a cookie. A URL can leak through
+> browser history, referrer headers, or a shared link. It is mitigated (hashed
+> at rest, dual expiry, short-by-default, instantly revocable) rather than
+> solved. If you deploy this somewhere that matters, put a real identity
+> provider in front of it via `st.login()` / OIDC, or add a cookie component.
+
 ## Running it
 
 ```bash
@@ -40,9 +71,11 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-65 tests: engine math against closed-form answers, insight correctness, and
-end-to-end UI tests that drive every page through Streamlit's `AppTest`
-(including empty accounts, zero-APR loans, and negative-amortization plans).
+129 tests: engine math against closed-form amortization answers, insight
+correctness, the full auth surface (policy, throttling, session expiry,
+recovery codes), and end-to-end UI tests that drive every page and the login
+screen through Streamlit's `AppTest` — including empty accounts, zero-APR
+loans, and negative-amortization plans.
 
 ## Persistence and deployment
 
@@ -79,7 +112,8 @@ debtapp/
   insights.py          ranked, quantified advice
   charts.py            Plotly figures
   theme.py             validated palette + Plotly template
-  db.py                SQLite persistence, bcrypt auth, sessions
+  security.py          password policy + recovery codes (no storage)
+  db.py                SQLite persistence, bcrypt auth, sessions, throttling
   ui/                  one module per page
 tests/                 engine, insight, and end-to-end UI tests
 ```
