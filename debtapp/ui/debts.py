@@ -25,6 +25,30 @@ def _to_df(debts: list[Debt], kind: str, cols: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
 
 
+def _seed(debts: list[Debt], kind: str, cols: list[str], key: str) -> pd.DataFrame:
+    """The frame to hand an editor — deliberately the *same* one on every rerun.
+
+    ``st.data_editor`` hashes the data it is given into its own widget id, so
+    handing it back the rows we saved a moment ago makes it a *different*
+    widget: the grid remounts, and the cell the user has already started typing
+    arrives labelled with an id that no longer exists and is thrown away. That
+    is the "saves one cell, eats the next one" bug, and it fires on every edit,
+    because every edit is autosaved back into the rows below.
+
+    The editor holds its edits as a delta against this frame, so it only wants a
+    new one when it has no delta to lose — a first render, or a return to the
+    page after Streamlit binned its state — or when the rows moved underneath
+    it, which the callers that can do that announce by bumping ``debts_rev``,
+    and which shows up here as a widget key it has not seen before.
+    """
+    slot = f"_seed_{kind}"
+    stash = st.session_state.get(slot)
+    if stash is None or stash[0] != key or key not in st.session_state:
+        stash = (key, _to_df(debts, kind, cols))
+        st.session_state[slot] = stash
+    return stash[1]
+
+
 def _from_df(df: pd.DataFrame, kind: str, cols: list[str]) -> list[Debt]:
     out = []
     for _, r in df.iterrows():
@@ -160,9 +184,11 @@ def render() -> None:
                 "Everything here saves automatically. Come back any time and your numbers "
                 "will be waiting.")
 
-    # Both editors are keyed by revision so a button below can throw their
-    # pending edits away — see `_apply`.
+    # Both editors are keyed by revision so a button below — or a payment logged
+    # on the Ledger — can throw their pending edits away. See `_apply` and
+    # `_seed`: the revision is the one thing that reseeds them.
     rev = st.session_state.get("debts_rev", 0)
+    cards_key, loans_key = f"ed_cards_{rev}", f"ed_loans_{rev}"
 
     # ----------------------------------------------------------- credit cards
     section("Credit cards & revolving credit",
@@ -170,8 +196,8 @@ def render() -> None:
             "you pay — which is exactly why they take so long to clear. Set the percentage and "
             "the dollar floor from your statement.")
     cards = st.data_editor(
-        _to_df(debts, CREDIT_CARD, CARD_COLS),
-        num_rows="dynamic", width="stretch", hide_index=True, key=f"ed_cards_{rev}",
+        _seed(debts, CREDIT_CARD, CARD_COLS, cards_key),
+        num_rows="dynamic", width="stretch", hide_index=True, key=cards_key,
         column_config={
             "name": st.column_config.TextColumn("Card", required=True, width="medium"),
             "balance": st.column_config.NumberColumn("Balance", **_MONEY),
@@ -198,8 +224,8 @@ def render() -> None:
             "Auto, student, personal, mortgage — anything with a fixed monthly payment and an "
             "end date.")
     loans = st.data_editor(
-        _to_df(debts, TERM_LOAN, LOAN_COLS),
-        num_rows="dynamic", width="stretch", hide_index=True, key=f"ed_loans_{rev}",
+        _seed(debts, TERM_LOAN, LOAN_COLS, loans_key),
+        num_rows="dynamic", width="stretch", hide_index=True, key=loans_key,
         column_config={
             "name": st.column_config.TextColumn("Loan", required=True, width="medium"),
             "subtype": st.column_config.SelectboxColumn("Type", options=LOAN_SUBTYPES,
