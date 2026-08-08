@@ -11,8 +11,9 @@ from debtapp import db
 from debtapp import engine as E
 from debtapp import payments as P
 from debtapp.ui import account, auth, dashboard, debts, insights_page, ledger, scenarios
-from debtapp.ui.common import (active_debts, build_plan, duration, effective_budget,
-                               esc_html, inject_css, load_state, money, user_payments)
+from debtapp.ui.common import (active_debts, build_plan, build_tag, duration,
+                               effective_budget, esc_html, inject_css, load_state, money,
+                               user_payments)
 
 st.set_page_config(page_title="Debt Manager", page_icon="💸", layout="wide",
                    initial_sidebar_state="expanded")
@@ -59,6 +60,9 @@ def _sidebar_summary() -> None:
 def main() -> None:
     db.init_db()
     inject_css()
+    # Before the auth branch: the sign-in screen is the one an unauthenticated
+    # visitor sees, so it is the one that has to carry the build stamp.
+    build_tag()
     auth.restore_session()
 
     if not st.session_state.get("user_id"):

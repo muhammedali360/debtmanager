@@ -521,3 +521,41 @@ def test_the_real_entry_point_boots_signed_in(user):
     at.run(timeout=90)
 
     assert not at.exception, f"app.py raised: {[e.value for e in at.exception]}"
+
+
+def test_build_tag_is_stamped_on_the_sign_in_screen():
+    """The badge exists to tell a stale deploy from a fresh one, so it has to
+    render for a visitor who has no account yet — that is who is looking."""
+    from debtapp.version import build_id
+
+    at = AppTest.from_file(str(Path(__file__).parent.parent / "app.py"))
+    at.run(timeout=90)
+
+    assert not at.exception, f"app.py raised: {[e.value for e in at.exception]}"
+    assert f"build {build_id()}" in " ".join(m.value for m in at.markdown)
+
+
+def test_build_id_falls_back_instead_of_raising(monkeypatch):
+    """A version badge is never worth taking the app down for, so every way git
+    can fail has to come back as a string."""
+    import subprocess
+
+    from debtapp import version
+
+    monkeypatch.delenv("DEBTMANAGER_BUILD", raising=False)
+    version.build_id.cache_clear()
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("no git")))
+    assert version.build_id() == version.UNKNOWN
+    version.build_id.cache_clear()
+
+
+def test_build_id_prefers_the_environment(monkeypatch):
+    """Hosts that deploy from an export rather than a checkout have no .git to
+    read, and inject the sha instead."""
+    from debtapp import version
+
+    monkeypatch.setenv("DEBTMANAGER_BUILD", "deadbee")
+    version.build_id.cache_clear()
+    assert version.build_id() == "deadbee"
+    version.build_id.cache_clear()
