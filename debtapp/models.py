@@ -17,6 +17,13 @@ DEBT_KINDS = {
 # Sub-labels help us give better advice without changing the math.
 LOAN_SUBTYPES = ["Auto", "Student", "Personal", "Mortgage", "Medical", "Other"]
 
+# The one list the UI asks from. `kind` is a real modelling distinction — a card's
+# minimum is a percentage of the balance and shrinks as you pay, a loan's is a
+# fixed contractual figure — but it is *our* distinction, not the user's, and
+# making them declare it up front (by choosing which of two tables to type into)
+# asked them to classify their debt before they had entered any of it.
+ACCOUNT_TYPES = ["Credit card"] + LOAN_SUBTYPES
+
 
 def amortized_payment(balance: float, apr: float, months: int) -> float:
     """The level monthly payment that retires `balance` in exactly `months`."""
@@ -103,6 +110,18 @@ class Debt:
     def from_dict(cls, d: dict) -> "Debt":
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in d.items() if k in known})
+
+
+def kind_for(account_type: str) -> tuple[str, str]:
+    """``(kind, subtype)`` for one of the :data:`ACCOUNT_TYPES` labels."""
+    if account_type == "Credit card":
+        return CREDIT_CARD, "Other"
+    return TERM_LOAN, (account_type if account_type in LOAN_SUBTYPES else "Other")
+
+
+def type_of(debt: Debt) -> str:
+    """The inverse of :func:`kind_for` — the label to show for a stored debt."""
+    return "Credit card" if debt.kind == CREDIT_CARD else (debt.subtype or "Other")
 
 
 @dataclass

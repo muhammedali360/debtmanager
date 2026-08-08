@@ -124,7 +124,7 @@ def render_recovery_codes_gate() -> bool:
     st.download_button("Download codes", "\n".join(codes),
                        file_name="debt-manager-recovery-codes.txt", mime="text/plain")
     if st.checkbox("I've saved these somewhere safe"):
-        if st.button("Continue to my dashboard", type="primary"):
+        if st.button("Continue to my plan", type="primary"):
             del st.session_state.fresh_codes
             st.rerun()
     return True

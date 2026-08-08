@@ -58,8 +58,7 @@ def _page(module_name: str, uid: int, db) -> AppTest:
     return at.run(timeout=60)
 
 
-PAGES = ["debtapp.ui.dashboard", "debtapp.ui.debts", "debtapp.ui.insights_page",
-         "debtapp.ui.scenarios", "debtapp.ui.account", "debtapp.ui.ledger"]
+PAGES = ["debtapp.ui.plan", "debtapp.ui.debts", "debtapp.ui.account", "debtapp.ui.ledger"]
 
 
 @pytest.mark.parametrize("page", PAGES)
@@ -78,30 +77,72 @@ def test_page_renders_with_no_debts_at_all(page, user):
     assert not at.exception, f"{page} raised on empty state: {[e.value for e in at.exception]}"
 
 
-def test_dashboard_shows_the_headline_numbers(user):
+def test_a_brand_new_account_gets_asked_for_a_debt_rather_than_redirected(user):
+    """Onboarding used to be a checkbox on the signup form; untick it and the
+    empty app pointed you at a different page. Four fields, answered live."""
     uid, db = user
-    at = _page("debtapp.ui.dashboard", uid, db)
+    db.save_debts(uid, [])
+    budget_before = db.load_profile(uid).monthly_budget
+    at = _page("debtapp.ui.plan", uid, db)
+    assert not at.exception
+    assert "start with one account" in " ".join(m.value for m in at.markdown)
+    assert at.button(key="ob_add").disabled, "nothing has been typed yet"
+
+    at.text_input(key="ob_name").set_value("First card")
+    at.number_input(key="ob_balance").set_value(5_000.0)
+    at.number_input(key="ob_apr").set_value(19.99)
+    at.number_input(key="ob_payment").set_value(200.0)
+    at = at.run(timeout=60)
+    assert not at.exception
+
+    # The projection is on screen *before* the button is pressed — that is the
+    # whole point of asking for four fields instead of eight.
+    assert "clear this in" in " ".join(m.value for m in at.markdown)
+    assert db.load_debts(uid) == [], "nothing saved until the user says so"
+
+    at.button(key="ob_add").click().run(timeout=60)
+    assert not at.exception
+    (debt,) = db.load_debts(uid)
+    assert (debt.name, debt.balance, debt.apr, debt.current_payment) == \
+        ("First card", 5_000.0, 19.99, 200.0)
+    # Onboarding must not pin the budget to this one account's payment: left
+    # alone, `effective_budget` keeps deriving it from what the accounts
+    # actually pay, so adding a second debt raises it by itself.
+    assert db.load_profile(uid).monthly_budget == budget_before
+
+
+def test_plan_shows_the_headline_numbers(user):
+    uid, db = user
+    at = _page("debtapp.ui.plan", uid, db)
     body = " ".join(m.value for m in at.markdown)
     assert "Total owed" in body and "Debt-free" in body
     assert "$28,250" in body  # 8,400 + 1,250 + 18,600
 
 
-def test_insights_page_produces_ranked_cards(user):
+def test_plan_leads_with_one_suggestion_and_folds_the_rest_away(user):
+    """The suggestions are ranked by dollars at stake, which is worth nothing if
+    the page shows twenty of them at once."""
     uid, db = user
-    at = _page("debtapp.ui.insights_page", uid, db)
+    at = _page("debtapp.ui.plan", uid, db)
     body = " ".join(m.value for m in at.markdown)
-    assert 'class="ins ' in body
-    assert "Biggest single move" in body
+    assert "What to do next" in body
+
+    blocks = [m for m in at.markdown if 'class="ins ' in m.value]
+    assert blocks, "no suggestions rendered at all"
+    assert blocks[0].value.count('class="ins ') == 1, "the lead card must stand alone"
+    assert any(e.label.startswith("More suggestions") for e in at.expander), \
+        "the rest of the ranking has to stay reachable"
 
 
-def test_scenarios_slider_changes_the_projection(user):
+def test_the_extra_payment_slider_prices_a_bigger_payment(user):
     uid, db = user
-    at = _page("debtapp.ui.scenarios", uid, db)
+    at = _page("debtapp.ui.plan", uid, db)
     before = " ".join(m.value for m in at.markdown)
     at.slider[0].set_value(500).run(timeout=60)  # extra per month
     assert not at.exception
     after = " ".join(m.value for m in at.markdown)
     assert before != after, "moving the extra-payment slider changed nothing"
+    assert "Interest saved" in after and "Time saved" in after
 
 
 def test_debts_page_edits_persist_to_the_database(user):
@@ -118,7 +159,7 @@ def _balance(db, uid: int, name: str) -> float:
     return next(d for d in db.load_debts(uid) if d.name == name).balance
 
 
-def _typed(at, key: str, delta: dict):
+def _typed(at, key: str, delta: dict, added=None):
     """Post a grid's accumulated edits the way the browser does.
 
     The browser holds one delta per grid and grows it as you move across the
@@ -126,8 +167,58 @@ def _typed(at, key: str, delta: dict):
     the grid is handed data that changes identity mid-edit, the whole delta
     lands on a widget that no longer exists and is dropped.
     """
-    at.session_state[key] = {"edited_rows": delta, "added_rows": [], "deleted_rows": []}
+    at.session_state[key] = {"edited_rows": delta, "added_rows": added or [],
+                             "deleted_rows": []}
     return at.run(timeout=60)
+
+
+def test_a_blank_minimum_percent_falls_back_to_the_model_default(user):
+    """A cell left empty means "I didn't say", not "zero".
+
+    `min_percent` is the whole minimum-payment model for a card — the required
+    payment is `max(min_payment, min_percent% of balance)`. Coercing a blank to
+    0.0 quietly deleted the percentage floor, so a card added without opening
+    the payment details projected against a minimum no lender would accept.
+    """
+    uid, db = user
+    at = _page("debtapp.ui.debts", uid, db)
+    at = _typed(at, "ed_debts_0_basic", {},
+                [{"name": "New card", "type": "Credit card", "balance": 4_000.0, "apr": 22.0}])
+    assert not at.exception
+
+    added = next(d for d in db.load_debts(uid) if d.name == "New card")
+    assert added.min_percent == 2.0, "a blank percentage silently removed the minimum floor"
+    # 2% of the balance plus this month's interest, not $0.
+    assert added.required_payment(4_000.0) == pytest.approx(80.0)
+
+
+def test_the_grid_takes_cards_and_loans_in_one_table(user):
+    """The card/loan split is a modelling distinction, not a question the user
+    should have to answer before typing anything."""
+    uid, db = user
+    at = _page("debtapp.ui.debts", uid, db)
+    at = _typed(at, "ed_debts_0_basic", {},
+                [{"name": "Bike loan", "type": "Personal", "balance": 3_000.0, "apr": 9.0}])
+    assert not at.exception
+
+    added = next(d for d in db.load_debts(uid) if d.name == "Bike loan")
+    assert added.kind == TERM_LOAN and added.subtype == "Personal"
+    assert not added.is_card
+
+
+def test_hiding_the_payment_details_does_not_wipe_them(user):
+    """The detail columns are hidden by config, not dropped from the frame. If
+    they were dropped, every autosave from the basic view would zero a minimum
+    the user set months ago."""
+    uid, db = user
+    at = _page("debtapp.ui.debts", uid, db)
+    at = _typed(at, "ed_debts_0_basic", {0: {"balance": 7_000.0}})
+    assert not at.exception
+
+    chase = next(d for d in db.load_debts(uid) if d.name == "Chase")
+    assert chase.balance == 7_000.0
+    assert (chase.min_payment, chase.min_percent, chase.credit_limit) == (35.0, 2.0, 12_000.0)
+    assert chase.due_day == DUE_TODAY
 
 
 def test_editing_one_cell_does_not_throw_away_the_next_one(user):
@@ -137,10 +228,10 @@ def test_editing_one_cell_does_not_throw_away_the_next_one(user):
     uid, db = user
     at = _page("debtapp.ui.debts", uid, db)
 
-    at = _typed(at, "ed_cards_0", {0: {"balance": 9_000.0}})
+    at = _typed(at, "ed_debts_0_basic", {0: {"balance": 9_000.0}})
     assert _balance(db, uid, "Chase") == 9_000.0
 
-    at = _typed(at, "ed_cards_0", {0: {"balance": 9_000.0, "apr": 19.99}})
+    at = _typed(at, "ed_debts_0_basic", {0: {"balance": 9_000.0, "apr": 19.99}})
     assert not at.exception
 
     chase = next(d for d in db.load_debts(uid) if d.name == "Chase")
@@ -154,7 +245,7 @@ def test_a_payment_logged_on_the_ledger_survives_a_return_to_my_debts(user):
     writing the old figure back and silently undoing it."""
     uid, db = user
     at = _page("debtapp.ui.debts", uid, db)
-    at = _typed(at, "ed_cards_0", {0: {"balance": 8_000.0}})
+    at = _typed(at, "ed_debts_0_basic", {0: {"balance": 8_000.0}})
     assert _balance(db, uid, "Chase") == 8_000.0
 
     chase_id = next(d for d in db.load_debts(uid) if d.name == "Chase").id
@@ -283,9 +374,9 @@ def _log(db, uid, name: str, amount: float, when: date):
     return db.record_payment(uid, P.build_payment(debt, amount, when))
 
 
-def test_the_dashboard_asks_about_a_payment_that_is_due(user):
+def test_the_plan_asks_about_a_payment_that_is_due(user):
     uid, db = user
-    at = _page("debtapp.ui.dashboard", uid, db)
+    at = _page("debtapp.ui.plan", uid, db)
     assert not at.exception
     body = " ".join(m.value for m in at.markdown)
     assert "Payments coming up" in body
@@ -358,11 +449,19 @@ def test_logging_todays_payment_does_reduce_the_balance(user):
 def test_a_logged_payment_stops_the_app_asking_again(user):
     uid, db = user
     _log(db, uid, "Store card", 40.0, TODAY)
-    at = _page("debtapp.ui.dashboard", uid, db)
+    at = _page("debtapp.ui.plan", uid, db)
     assert not at.exception
-    body = " ".join(m.value for m in at.markdown)
-    assert "3 days late" not in body
-    assert "Store card" not in body or "Paid" in body
+    assert "3 days late" not in " ".join(m.value for m in at.markdown)
+
+    # Asserted against the due panel's own buttons rather than against the page
+    # text: the Plan page's suggestions discuss accounts by name, so "Store card
+    # is not mentioned anywhere" stopped meaning "the app isn't asking about it".
+    # Chase is still due and unpaid, which is what makes this a real check.
+    ids = {d.name: d.id for d in db.load_debts(uid)}
+    keys = {b.key for b in at.button}
+    assert f"due_btn_{ids['Store card']}_Store card" not in keys, \
+        "still asking for a payment that was already logged"
+    assert f"due_btn_{ids['Chase']}_Chase" in keys
 
 
 def test_the_ledger_counts_what_the_debt_has_actually_cost(user):
@@ -389,7 +488,7 @@ def test_the_ledger_page_survives_having_no_payments(user):
 
 def test_insights_escalate_an_overdue_payment_above_everything_else(user):
     uid, db = user
-    at = _page("debtapp.ui.insights_page", uid, db)
+    at = _page("debtapp.ui.plan", uid, db)
     assert not at.exception
     body = " ".join(m.value for m in at.markdown)
     assert "past due" in body
@@ -400,7 +499,7 @@ def test_insights_report_real_interest_once_there_is_history(user):
     uid, db = user
     _log(db, uid, "Chase", 250.0, TODAY - timedelta(days=40))
     _log(db, uid, "Chase", 250.0, TODAY - timedelta(days=10))
-    at = _page("debtapp.ui.insights_page", uid, db)
+    at = _page("debtapp.ui.plan", uid, db)
     assert not at.exception
     body = " ".join(m.value for m in at.markdown)
     assert "handed over" in body and "in interest since" in body
@@ -422,7 +521,7 @@ def test_debts_with_no_due_day_are_nudged_to_add_one(user):
     for d in debts:
         d.due_day = 0
     db.save_debts(uid, debts)
-    at = _page("debtapp.ui.dashboard", uid, db)
+    at = _page("debtapp.ui.plan", uid, db)
     assert not at.exception
     assert "due day" in " ".join(m.value for m in at.markdown)
     assert not any(b.label == "I paid this" for b in at.button)
