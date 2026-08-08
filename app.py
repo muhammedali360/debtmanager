@@ -28,8 +28,10 @@ def _build_tag() -> None:
     able to go stale in the same way, so it depends on nothing but a module
     that did not exist before it.
     """
+    # Sat clear of the bottom-right corner: Community Cloud parks its own
+    # floating "manage app" pill there and covers anything underneath it.
     st.markdown(
-        '<div style="position:fixed;right:10px;bottom:7px;z-index:90;font-size:10.5px;'
+        '<div style="position:fixed;right:12px;bottom:58px;z-index:90;font-size:10.5px;'
         'letter-spacing:.02em;opacity:.5;pointer-events:none;font-variant-numeric:'
         f'tabular-nums">build {esc_html(build_id())}</div>',
         unsafe_allow_html=True)
