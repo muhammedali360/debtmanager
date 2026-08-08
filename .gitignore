@@ -9,5 +9,7 @@ data/
 *.db
 .streamlit/secrets.toml
 
-# tools/screenshot.mjs needs Playwright; the install is local, not vendored
-node_modules/
+# tools/screenshot.mjs needs Playwright; the install is local, not vendored.
+# No trailing slash: pointing node_modules at a shared install makes it a
+# symlink, which git treats as a file, and "node_modules/" does not match it.
+node_modules
