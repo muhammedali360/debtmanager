@@ -9,10 +9,14 @@ from .. import engine as E
 from ..models import CREDIT_CARD, LOAN_SUBTYPES, TERM_LOAN, Debt
 from .common import current_user, money, persist, stat_row
 
-CARD_COLS = ["name", "balance", "apr", "credit_limit", "min_payment", "min_percent",
-             "current_payment"]
-LOAN_COLS = ["name", "subtype", "balance", "apr", "min_payment", "term_months",
-             "current_payment"]
+# "id" rides along hidden (column_config maps it to None). It is what keeps a
+# card's logged payment history attached to it across renames and edits.
+CARD_COLS = ["id", "name", "balance", "apr", "credit_limit", "min_payment", "min_percent",
+             "current_payment", "due_day"]
+LOAN_COLS = ["id", "name", "subtype", "balance", "apr", "min_payment", "term_months",
+             "current_payment", "due_day"]
+
+_INT_COLS = ("term_months", "due_day")
 
 
 def _to_df(debts: list[Debt], kind: str, cols: list[str]) -> pd.DataFrame:
@@ -29,16 +33,24 @@ def _from_df(df: pd.DataFrame, kind: str, cols: list[str]) -> list[Debt]:
         vals = {}
         for c in cols:
             v = r.get(c)
-            if c in ("name", "subtype"):
+            if c == "id":
+                # Blank on rows the user just added — those become new records.
+                vals["id"] = int(v) if pd.notna(v) else None
+            elif c in ("name", "subtype"):
                 vals[c] = str(v) if pd.notna(v) else ("Other" if c == "subtype" else name)
+            elif c in _INT_COLS:
+                vals[c] = 0 if pd.isna(v) else int(v)
             else:
                 vals[c] = 0.0 if pd.isna(v) else float(v)
-        vals["term_months"] = int(vals.get("term_months", 0) or 0)
         out.append(Debt(kind=kind, **vals))
     return out
 
 
 _MONEY = dict(format="dollar", min_value=0.0, step=25.0)
+_DUE_DAY = st.column_config.NumberColumn(
+    "Due day", help="Day of the month this payment is due (1–31). Set it and the app will "
+                    "tell you what's coming up and ask whether you've paid. Leave 0 to skip.",
+    min_value=0, max_value=31, step=1, format="%d")
 
 
 def render() -> None:
@@ -74,6 +86,8 @@ def render() -> None:
                 min_value=0.0, max_value=25.0, step=0.5),
             "current_payment": st.column_config.NumberColumn(
                 "You pay now", help="What you actually send each month.", **_MONEY),
+            "due_day": _DUE_DAY,
+            "id": None,
         },
     )
 
@@ -97,6 +111,8 @@ def render() -> None:
                 "Months left", help="Optional — used only if you leave the payment at 0.",
                 min_value=0, max_value=480, step=1),
             "current_payment": st.column_config.NumberColumn("You pay now", **_MONEY),
+            "due_day": _DUE_DAY,
+            "id": None,
         },
     )
 
@@ -166,8 +182,12 @@ def render() -> None:
     profile.strategy = strategy
     profile.custom_order = custom_order
 
-    signature = ([d.to_dict() for d in new_debts], profile.__dict__.copy())
-    if st.session_state.get("_saved_sig") != repr(signature):
+    def signature() -> str:
+        return repr(([d.to_dict() for d in new_debts], profile.__dict__.copy()))
+
+    if st.session_state.get("_saved_sig") != signature():
         persist(uid, new_debts, profile)
-        st.session_state._saved_sig = repr(signature)
+        # Recomputed *after* the write: saving stamps ids onto brand-new rows, and
+        # signing the pre-write state would make the next rerun look dirty again.
+        st.session_state._saved_sig = signature()
     st.caption("✓ Saved")

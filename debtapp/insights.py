@@ -8,10 +8,12 @@ paying more" without telling you exactly what it buys. Insights are ranked by
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Optional, Sequence
 
 from . import engine as E
-from .models import Debt, Profile, amortized_payment
+from . import payments as P
+from .models import Debt, Payment, Profile, amortized_payment
 
 CRITICAL, SERIOUS, WARNING, GOOD, INFO = "critical", "serious", "warning", "good", "info"
 
@@ -48,6 +50,10 @@ class Insight:
     action: Optional[str] = None
     metric: Optional[str] = None
     stake: float = 0.0  # dollars at stake — drives ordering
+    # False when `stake` is money that is already gone. Interest you paid last
+    # year still ranks the insight, but it is not "savings you could capture",
+    # and the total on the Insights page must not claim otherwise.
+    recoverable: bool = True
 
     @property
     def sort_key(self) -> tuple:
@@ -93,9 +99,12 @@ def generate(
     debts: Sequence[Debt],
     profile: Profile,
     budget: Optional[float] = None,
+    payments: Optional[Sequence[Payment]] = None,
+    today: Optional[date] = None,
 ) -> list[Insight]:
     """Produce the full ranked insight list for a user's situation."""
     debts = [d for d in debts if d.balance > 0]
+    payments = list(payments or [])
     if not debts:
         return [Insight(GOOD, "You're debt free", "No balances on file. Nothing to optimize — "
                         "put the payment you were making into savings instead.")]
@@ -118,6 +127,8 @@ def generate(
     aval = _sim(debts, budget, strategy=E.AVALANCHE)
     snow = _sim(debts, budget, strategy=E.SNOWBALL)
 
+    out += _payment_calendar(debts, payments, today)
+    out += _ledger_reality(payments, plan, today)
     out += _feasibility(debts, plan, budget, min_budget)
     out += _the_trap(debts, plan, mins, budget, min_budget)
     out += _strategy_gap(plan, aval, snow, strategy)
@@ -135,6 +146,147 @@ def generate(
     out += _cost_of_waiting(debts, budget, strategy, order, plan)
 
     return sorted(out, key=lambda i: i.sort_key)
+
+
+def _payment_calendar(debts, payments, today) -> list[Insight]:
+    """What the calendar says, which beats what the amortization says.
+
+    A missed payment is the one failure mode that costs more than every
+    ordering decision in this file put together, so it sorts above them.
+    """
+    out: list[Insight] = []
+    items = P.upcoming(debts, payments, today)
+    if not items:
+        if debts:
+            out.append(Insight(
+                INFO,
+                "Add your due dates and this app can watch the calendar for you",
+                "None of your accounts have a due day on file. Add one to each on the *My debts* "
+                "page and you'll get a running list of what's coming, a one-click way to record "
+                "each payment, and a ledger of what this debt has really cost you.",
+                action="It takes about a minute and it's the only number here you can read "
+                       "straight off a statement.",
+                stake=0.0,
+            ))
+        return out
+
+    late = [i for i in items if i.status == P.OVERDUE]
+    if late:
+        owed = sum(i.outstanding for i in late)
+        worst = min(late, key=lambda i: i.days)  # most negative = furthest past due
+        names = ", ".join(i.name for i in late)
+        # A late fee is a fixed, near-certain cost; the penalty APR is the tail
+        # risk that actually does the damage.
+        fees = 32.0 * len(late)
+        out.append(Insight(
+            CRITICAL,
+            f"{names} {'is' if len(late) == 1 else 'are'} past due",
+            f"**{names}** — **{money(owed)}** outstanding, and **{worst.name}** is "
+            f"**{-worst.days} day{'s' if worst.days != -1 else ''}** past its due date.\n\n"
+            f"A late fee is typically **$32** apiece (**{money(fees)}** here). Worse, most card "
+            "agreements let the issuer impose a penalty APR near **29.99%** after a single miss, "
+            "and at **30 days** the lender reports it to the credit bureaus — a mark that stays on "
+            "your file for seven years and costs you far more than the fee ever will.",
+            action="Pay something today even if you can't pay it all; a partial payment before "
+                   "day 30 keeps it off your credit report. If you genuinely can't, call the "
+                   "lender — a hardship note costs nothing and they can waive the fee.",
+            metric=f"{-worst.days} days late",
+            stake=fees + owed * 0.15,
+        ))
+
+    now_due = [i for i in items if i.status == P.DUE_TODAY]
+    if now_due:
+        total = sum(i.outstanding for i in now_due)
+        out.append(Insight(
+            SERIOUS,
+            f"{'A payment is' if len(now_due) == 1 else f'{len(now_due)} payments are'} due today",
+            f"**{', '.join(i.name for i in now_due)}** — **{money(total)}** due today. Same-day "
+            "transfers between banks often don't post until the next business day, so 'today' "
+            "usually means 'already late'.",
+            action="Send it now, then set up autopay for at least the minimum. Autopay on the "
+                   "minimum is a floor, not a plan — you can always pay more on top.",
+            metric=money(total),
+            stake=32.0 * len(now_due),
+        ))
+
+    soon = [i for i in items if i.status == P.DUE_SOON]
+    if soon:
+        total = sum(i.outstanding for i in soon)
+        nxt = min(soon, key=lambda i: i.days)
+        out.append(Insight(
+            WARNING,
+            f"{money(total)} due in the next week",
+            f"**{len(soon)}** payment{'s' if len(soon) != 1 else ''} coming up: "
+            + ", ".join(f"**{i.name}** {money(i.amount)} ({i.phrase})" for i in soon) + ". "
+            f"The first is **{nxt.name}**, {nxt.phrase}.",
+            action="Check the balance in your current account covers all of it before the first "
+                   "one lands. An overdraft fee to make a debt payment is the worst trade there is.",
+            metric=money(total),
+            stake=0.0,
+        ))
+
+    covered = [i for i in items if i.status == P.PAID]
+    if covered and not late and not now_due:
+        out.append(Insight(
+            GOOD,
+            "Everything on file is paid for this cycle",
+            f"All **{len(covered)}** account{'s' if len(covered) != 1 else ''} with a due date on "
+            "file have been paid this cycle. On-time payment history is **35% of a FICO score** — "
+            "the single largest input, larger than the balances themselves.",
+            metric=f"{len(covered)}/{len(items)}",
+            stake=0.0,
+        ))
+    return out
+
+
+def _ledger_reality(payments, plan, today) -> list[Insight]:
+    """The counters off the ledger. Recorded money, not projected money."""
+    out: list[Insight] = []
+    t = P.totals(payments)
+    if t["count"] < 2:
+        return out
+
+    share = t["interest_share"]
+    out.append(Insight(
+        SERIOUS if share >= 0.35 else WARNING if share >= 0.2 else INFO,
+        f"You've handed over {money(t['interest'])} in interest since {t['first']:%b %Y}",
+        f"Across **{t['count']}** logged payments totalling **{money(t['paid'])}**, "
+        f"**{money(t['interest'])}** went to interest and only **{money(t['principal'])}** came "
+        f"off what you owe. That is **{share * 100:.0f}¢ of every dollar** you sent — "
+        f"about **{money(t['interest'] / max(1, t['months']))} a month** buying nothing.\n\n"
+        "This is the one number on this page that isn't a projection. It already happened.",
+        action="Every extra dollar above the minimum skips the interest line entirely and lands "
+               "straight on principal. That is the whole game.",
+        metric=f"{share:.0%} to interest",
+        stake=t["interest"],
+        recoverable=False,
+    ))
+
+    year = P.interest_since_tracking(payments, 365, today)
+    if year > 100 and t["months"] >= 3:
+        out.append(Insight(
+            INFO,
+            f"Your debt cost you {money(year)} over the last 12 months",
+            f"**{money(year)}** in recorded interest in the past year — money that left your "
+            f"account and bought you nothing. Put differently, clearing this debt is worth a "
+            f"guaranteed **{money(year)}/year** raise, tax-free.",
+            metric=f"{money(year)}/yr",
+            stake=year,
+            recoverable=False,
+        ))
+
+    if t["principal"] > 0:
+        out.append(Insight(
+            GOOD,
+            f"You've knocked {money(t['principal'])} off your balances",
+            f"**{money(t['principal'])}** of real principal is gone, over "
+            f"**{t['months']}** month{'s' if t['months'] != 1 else ''} of logged payments — an "
+            f"average of **{money(t['principal'] / max(1, t['months']))}/month** of genuine "
+            "progress. Projections are easy to doubt; this part already happened.",
+            metric=money(t["principal"]),
+            stake=0.0,
+        ))
+    return out
 
 
 def _feasibility(debts, plan, budget, min_budget) -> list[Insight]:

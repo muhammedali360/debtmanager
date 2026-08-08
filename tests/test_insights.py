@@ -164,6 +164,49 @@ def test_no_balance_transfer_suggested_for_low_apr_cards():
     assert not [i for i in ins if "balance transfer" in i.title.lower()]
 
 
+# ------------------------------------------------- due dates and real payments
+
+def _ledger(n=3, amount=250.0, interest=170.0):
+    from datetime import date, timedelta
+    from debtapp.models import Payment
+    today = date.today()
+    return [Payment(debt_name="Card", paid_on=today - timedelta(days=30 * k),
+                    amount=amount, interest=interest, principal=amount - interest)
+            for k in range(1, n + 1)]
+
+
+def test_an_overdue_payment_outranks_every_other_insight():
+    from datetime import date
+    d = card(pays=250, balance=5_000)
+    d.due_day = 10
+    ins = I.generate([d], Profile(monthly_budget=400), payments=[],
+                     today=date(2026, 3, 15))
+    assert ins[0].severity == I.CRITICAL
+    assert "past due" in ins[0].title
+
+
+def test_accounts_without_a_due_day_get_a_nudge_not_a_warning():
+    ins = I.generate([card()], Profile(monthly_budget=400))
+    nudge = [i for i in ins if "due dates" in i.title]
+    assert nudge and nudge[0].severity == I.INFO
+
+
+def test_recorded_interest_is_reported_but_not_counted_as_savings():
+    """Money already paid ranks the insight; it is not money you can recover."""
+    ins = I.generate([card()], Profile(monthly_budget=400), payments=_ledger())
+    sunk = [i for i in ins if "handed over" in i.title]
+    assert sunk, titles(ins)
+    assert sunk[0].stake == pytest.approx(510.0)   # 3 x $170 of real interest
+    assert sunk[0].recoverable is False
+    assert all(i.recoverable for i in ins if i is not sunk[0]
+               and "cost you" not in i.title)
+
+
+def test_a_thin_ledger_makes_no_claims():
+    ins = I.generate([card()], Profile(monthly_budget=400), payments=_ledger(n=1))
+    assert not [i for i in ins if "handed over" in i.title]
+
+
 # ------------------------------------------------------------------ integrity
 
 def test_stakes_are_never_negative():

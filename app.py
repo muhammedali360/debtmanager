@@ -9,9 +9,10 @@ import streamlit as st
 
 from debtapp import db
 from debtapp import engine as E
-from debtapp.ui import account, auth, dashboard, debts, insights_page, scenarios
+from debtapp import payments as P
+from debtapp.ui import account, auth, dashboard, debts, insights_page, ledger, scenarios
 from debtapp.ui.common import (active_debts, build_plan, duration, effective_budget,
-                               inject_css, load_state, money)
+                               inject_css, load_state, money, user_payments)
 
 st.set_page_config(page_title="Debt Manager", page_icon="💸", layout="wide",
                    initial_sidebar_state="expanded")
@@ -41,6 +42,15 @@ def _sidebar_summary() -> None:
                        f"**{money(effective_budget(ds, profile))}/mo** on "
                        f"{E.STRATEGY_LABELS[plan.strategy].split('—')[0].strip().lower()}.")
 
+    # The one thing that is actionable today rather than in five years.
+    due = P.actionable(ds, user_payments())
+    if due:
+        head = due[0]
+        st.sidebar.markdown(
+            f"{P.STATUS_ICON[head.status]} **{head.name}** — {money(head.amount)} "
+            f"{head.phrase}" + (f"  \n_+{len(due) - 1} more due soon_" if len(due) > 1 else "")
+        )
+
 
 def main() -> None:
     db.init_db()
@@ -64,12 +74,21 @@ def main() -> None:
     _sidebar_summary()
     st.sidebar.divider()
 
+    # Every page callable is named ``render``, so the URL path has to be given
+    # explicitly — Streamlit would otherwise infer "render" for all of them.
     nav = st.navigation([
-        st.Page(dashboard.render, title="Dashboard", icon=":material/dashboard:", default=True),
-        st.Page(debts.render, title="My debts", icon=":material/credit_card:"),
-        st.Page(insights_page.render, title="Insights", icon=":material/lightbulb:"),
-        st.Page(scenarios.render, title="What if…", icon=":material/timeline:"),
-        st.Page(account.render, title="Account", icon=":material/settings:"),
+        st.Page(dashboard.render, title="Dashboard", icon=":material/dashboard:",
+                url_path="dashboard", default=True),
+        st.Page(debts.render, title="My debts", icon=":material/credit_card:",
+                url_path="debts"),
+        st.Page(ledger.render, title="Ledger", icon=":material/receipt_long:",
+                url_path="ledger"),
+        st.Page(insights_page.render, title="Insights", icon=":material/lightbulb:",
+                url_path="insights"),
+        st.Page(scenarios.render, title="What if…", icon=":material/timeline:",
+                url_path="scenarios"),
+        st.Page(account.render, title="Account", icon=":material/settings:",
+                url_path="account"),
     ])
 
     if st.sidebar.button("Sign out", width="stretch"):

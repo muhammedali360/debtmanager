@@ -7,11 +7,12 @@ import streamlit as st
 
 from .. import charts, db
 from .. import engine as E
+from . import ledger
 from .common import (active_debts, build_plan, chart, current_user, duration,
                      effective_budget, is_dark, money, needs_debts, stat_row)
 
 
-def _ledger_table(schedule: E.Schedule) -> pd.DataFrame:
+def _schedule_table(schedule: E.Schedule) -> pd.DataFrame:
     """The table-view twin for the projection charts."""
     if schedule.monthly.empty:
         return pd.DataFrame()
@@ -74,9 +75,15 @@ def render() -> None:
             "raise your APR to ~30%. Call them before that happens."
         )
 
+    # ------------------------------------------------------------- what's due
+    # What's due beats what's projected — a payment you forget costs more than
+    # any ordering decision below.
+    if ledger.due_panel(limit=4):
+        st.divider()
+
     # ----------------------------------------------------------------- charts
     chart(charts.balance_projection(plan, dark, [d.name for d in debts]),
-          _ledger_table(plan), key="proj", table_label="View month-by-month schedule")
+          _schedule_table(plan), key="proj", table_label="View month-by-month schedule")
 
     left, right = st.columns([1, 1])
     with left:

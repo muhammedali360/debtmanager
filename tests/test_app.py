@@ -5,11 +5,18 @@ which ``debtapp.db`` reads at import time — hence the reload in the fixture.
 """
 
 import importlib
+from datetime import date, timedelta
 
 import pytest
 from streamlit.testing.v1 import AppTest
 
 from debtapp.models import CREDIT_CARD, TERM_LOAN, Debt, Profile
+
+# Due days chosen relative to the real "today" so status is deterministic on any
+# day the suite happens to run: one payment is due today, one is three days late.
+TODAY = date.today()
+DUE_TODAY = TODAY.day
+DUE_LATE = (TODAY - timedelta(days=3)).day
 
 
 @pytest.fixture()
@@ -21,9 +28,9 @@ def user(tmp_path, monkeypatch):
     uid = db.create_user("a@b.com", "hunter2hunter2")
     db.save_debts(uid, [
         Debt(name="Chase", kind=CREDIT_CARD, balance=8_400, apr=24.99, min_payment=35,
-             min_percent=2.0, credit_limit=12_000, current_payment=250),
+             min_percent=2.0, credit_limit=12_000, current_payment=250, due_day=DUE_TODAY),
         Debt(name="Store card", kind=CREDIT_CARD, balance=1_250, apr=29.99, min_payment=25,
-             min_percent=3.0, credit_limit=2_000, current_payment=40),
+             min_percent=3.0, credit_limit=2_000, current_payment=40, due_day=DUE_LATE),
         Debt(name="Car loan", kind=TERM_LOAN, subtype="Auto", balance=18_600, apr=7.4,
              min_payment=445, current_payment=445),
     ])
@@ -53,7 +60,7 @@ def _page(module_name: str, uid: int, db) -> AppTest:
 
 
 PAGES = ["debtapp.ui.dashboard", "debtapp.ui.debts", "debtapp.ui.insights_page",
-         "debtapp.ui.scenarios", "debtapp.ui.account"]
+         "debtapp.ui.scenarios", "debtapp.ui.account", "debtapp.ui.ledger"]
 
 
 @pytest.mark.parametrize("page", PAGES)
@@ -128,6 +135,159 @@ def test_zero_apr_and_zero_balance_rows_are_survivable(user):
     for page in PAGES:
         at = _page(page, uid, db)
         assert not at.exception, f"{page} crashed on zero-APR / zero-balance input"
+
+
+# ------------------------------------------------------- due dates and the ledger
+
+def _log(db, uid, name: str, amount: float, when: date):
+    from debtapp import payments as P
+    debt = next(d for d in db.load_debts(uid) if d.name == name)
+    return db.record_payment(uid, P.build_payment(debt, amount, when))
+
+
+def test_the_dashboard_asks_about_a_payment_that_is_due(user):
+    uid, db = user
+    at = _page("debtapp.ui.dashboard", uid, db)
+    assert not at.exception
+    body = " ".join(m.value for m in at.markdown)
+    assert "Payments coming up" in body
+    assert "Store card" in body and "3 days late" in body
+    assert "Chase" in body and "due today" in body
+    assert any(b.label == "I paid this" for b in at.button)
+
+
+def test_confirming_a_payment_records_it_and_moves_the_balance(user):
+    """The whole loop: the app asks, you say yes, and every number updates."""
+    uid, db = user
+    debt = next(d for d in db.load_debts(uid) if d.name == "Store card")
+    at = _page("debtapp.ui.ledger", uid, db)
+
+    at.button(key=f"due_btn_{debt.id}_Store card").click().run(timeout=60)
+    assert not at.exception
+
+    (payment,) = db.load_payments(uid)
+    assert payment.debt_name == "Store card"
+    assert payment.amount == 40.0
+    assert payment.paid_on == TODAY
+    # $1,250 at 29.99% accrues $31.24/mo, so $40 buys only $8.76 of principal.
+    assert payment.interest == pytest.approx(31.24, abs=0.01)
+    assert payment.principal == pytest.approx(8.76, abs=0.01)
+
+    after = next(d for d in db.load_debts(uid) if d.name == "Store card")
+    assert after.balance == pytest.approx(1_241.24, abs=0.01)
+    assert after.balance == payment.balance_after
+
+
+def test_backfilling_an_old_payment_does_not_touch_the_current_balance(user):
+    """The balance a user typed in already reflects payments they made months
+    ago. Deducting a backfilled payment again understates the debt and corrupts
+    every projection downstream."""
+    uid, db = user
+    at = _page("debtapp.ui.ledger", uid, db)
+    assert not at.exception
+    before = next(d for d in db.load_debts(uid) if d.name == "Chase").balance
+
+    at.date_input(key="log_when").set_value(TODAY - timedelta(days=60))
+    at = at.run(timeout=60)
+    # Backdating flips the default: this is history, not new money.
+    assert at.checkbox[0].value is False
+
+    at.button(key="FormSubmitter:log_payment_form-Log this payment").click()
+    at = at.run(timeout=60)
+    assert not at.exception
+
+    assert next(d for d in db.load_debts(uid) if d.name == "Chase").balance == before
+    (row,) = db.load_payments(uid)
+    assert row.paid_on == TODAY - timedelta(days=60)
+    assert row.balance_after is None  # no balance claimed for a date we can't know
+    assert row.interest > 0           # but it still counts toward what the debt cost
+
+
+def test_logging_todays_payment_does_reduce_the_balance(user):
+    """The other half of the same choice — the default must flip back."""
+    uid, db = user
+    at = _page("debtapp.ui.ledger", uid, db)
+    before = next(d for d in db.load_debts(uid) if d.name == "Chase").balance
+    assert at.checkbox[0].value is True
+
+    at.button(key="FormSubmitter:log_payment_form-Log this payment").click()
+    at = at.run(timeout=60)
+    assert not at.exception
+    after = next(d for d in db.load_debts(uid) if d.name == "Chase").balance
+    assert after < before
+
+
+def test_a_logged_payment_stops_the_app_asking_again(user):
+    uid, db = user
+    _log(db, uid, "Store card", 40.0, TODAY)
+    at = _page("debtapp.ui.dashboard", uid, db)
+    assert not at.exception
+    body = " ".join(m.value for m in at.markdown)
+    assert "3 days late" not in body
+    assert "Store card" not in body or "Paid" in body
+
+
+def test_the_ledger_counts_what_the_debt_has_actually_cost(user):
+    uid, db = user
+    _log(db, uid, "Chase", 250.0, TODAY - timedelta(days=40))
+    _log(db, uid, "Chase", 250.0, TODAY - timedelta(days=10))
+    _log(db, uid, "Car loan", 445.0, TODAY - timedelta(days=10))
+
+    at = _page("debtapp.ui.ledger", uid, db)
+    assert not at.exception
+    body = " ".join(m.value for m in at.markdown)
+    assert "Total paid" in body and "$945" in body
+    assert "Gone to interest" in body
+    assert "Off your balance" in body
+    assert "never touched your balance" in body
+
+
+def test_the_ledger_page_survives_having_no_payments(user):
+    uid, db = user
+    at = _page("debtapp.ui.ledger", uid, db)
+    assert not at.exception
+    assert any("No payments logged yet" in i.value for i in at.info)
+
+
+def test_insights_escalate_an_overdue_payment_above_everything_else(user):
+    uid, db = user
+    at = _page("debtapp.ui.insights_page", uid, db)
+    assert not at.exception
+    body = " ".join(m.value for m in at.markdown)
+    assert "past due" in body
+    assert "30 days" in body  # the credit-report threshold, not just the fee
+
+
+def test_insights_report_real_interest_once_there_is_history(user):
+    uid, db = user
+    _log(db, uid, "Chase", 250.0, TODAY - timedelta(days=40))
+    _log(db, uid, "Chase", 250.0, TODAY - timedelta(days=10))
+    at = _page("debtapp.ui.insights_page", uid, db)
+    assert not at.exception
+    body = " ".join(m.value for m in at.markdown)
+    assert "handed over" in body and "in interest since" in body
+
+
+def test_pages_survive_an_account_that_was_deleted_after_being_paid(user):
+    """Orphaned ledger rows (debt_id NULL) must not break rendering."""
+    uid, db = user
+    _log(db, uid, "Chase", 250.0, TODAY - timedelta(days=10))
+    db.save_debts(uid, [d for d in db.load_debts(uid) if d.name != "Chase"])
+    for page in PAGES:
+        at = _page(page, uid, db)
+        assert not at.exception, f"{page} crashed on an orphaned payment"
+
+
+def test_debts_with_no_due_day_are_nudged_to_add_one(user):
+    uid, db = user
+    debts = db.load_debts(uid)
+    for d in debts:
+        d.due_day = 0
+    db.save_debts(uid, debts)
+    at = _page("debtapp.ui.dashboard", uid, db)
+    assert not at.exception
+    assert any("due day" in c.value for c in at.caption)
+    assert not any(b.label == "I paid this" for b in at.button)
 
 
 # --------------------------------------------------------------- the login screen

@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from .. import db, security
-from .common import active_debts, build_plan, current_user, money
+from .common import active_debts, build_plan, current_user, money, user_payments
 from . import auth
 
 
@@ -83,7 +83,8 @@ def render() -> None:
     st.markdown("#### Export your data")
     debts = st.session_state.get("debts", [])
     profile = st.session_state.profile
-    c1, c2, c3 = st.columns(3)
+    paid = user_payments()
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.download_button(
             "Debts (CSV)",
@@ -91,12 +92,20 @@ def render() -> None:
             file_name="debts.csv", mime="text/csv", disabled=not debts, width="stretch",
         )
     with c2:
+        st.download_button(
+            "Payment ledger (CSV)",
+            pd.DataFrame([p.to_dict() for p in paid]).to_csv(index=False) if paid else "",
+            file_name="payment-ledger.csv", mime="text/csv", disabled=not paid,
+            width="stretch",
+        )
+    with c3:
         payload = {"debts": [d.to_dict() for d in debts], "profile": profile.__dict__,
+                   "payments": [p.to_dict() for p in paid],
                    "snapshots": db.load_snapshots(uid)}
         st.download_button("Everything (JSON)", json.dumps(payload, indent=2, default=str),
                            file_name="debt-manager-export.json", mime="application/json",
                            width="stretch")
-    with c3:
+    with c4:
         active = active_debts()
         sched = build_plan(active, profile).ledger if active else pd.DataFrame()
         st.download_button(

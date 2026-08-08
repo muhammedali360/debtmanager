@@ -298,6 +298,58 @@ def plan_race(plans: dict[str, E.Schedule], dark: bool) -> go.Figure:
     return _money_axis(fig)
 
 
+# ------------------------------------------------------------- the real ledger
+
+def ledger_cumulative(cum: pd.DataFrame, dark: bool) -> go.Figure:
+    """Money you have *actually* paid, split principal vs interest.
+
+    The dashboard twin of this chart is a projection. This one is history, so
+    the title says so — two similar-looking area charts that mean different
+    things is exactly how a user stops trusting either.
+    """
+    p = palette(dark)
+    if cum.empty:
+        return _no_data(dark, "What you've paid so far",
+                        "Log a payment and your real history starts here")
+
+    fig = _fig(dark, "What you've actually paid, cumulatively", height=340)
+    for col, name, color in (("cum_principal", "Principal (reduced your balance)", p["principal"]),
+                             ("cum_interest", "Interest (kept by the lender)", p["interest"])):
+        fig.add_trace(go.Scatter(
+            x=cum["date"], y=cum[col], name=name, mode="lines", stackgroup="one",
+            fillcolor=color, line=dict(width=GAP, color=p["surface"]),
+            hovertemplate="%{fullData.name}: $%{y:,.0f}<extra></extra>",
+        ))
+
+    last = cum.iloc[-1]
+    fig.add_annotation(x=last["date"], y=last["cum_paid"],
+                       text=f"${last['cum_interest']:,.0f} to interest", showarrow=False,
+                       xanchor="right", yshift=14, font=dict(color=p["interest"], size=12))
+    return _money_axis(fig)
+
+
+def payments_by_month(monthly: pd.DataFrame, dark: bool) -> go.Figure:
+    """Every month you've logged, and how much of it the lender kept."""
+    p = palette(dark)
+    if monthly.empty:
+        return _no_data(dark, "Your payments by month", "Log a payment to start your history")
+
+    fig = _fig(dark, "Your payments, month by month", height=320)
+    fig.add_trace(go.Bar(
+        x=monthly["month"], y=monthly["principal"], name="Principal",
+        marker_color=p["principal"], marker_line=dict(width=GAP, color=p["surface"]),
+        marker_cornerradius=4, hovertemplate="Principal: $%{y:,.0f}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=monthly["month"], y=monthly["interest"], name="Interest",
+        marker_color=p["interest"], marker_line=dict(width=GAP, color=p["surface"]),
+        marker_cornerradius=4, hovertemplate="Interest: $%{y:,.0f}<extra></extra>",
+    ))
+    fig.update_layout(barmode="stack", bargap=0.35)
+    fig.update_xaxes(type="category", title_text="")
+    return _money_axis(fig)
+
+
 def progress_history(snapshots: list[dict], dark: bool) -> go.Figure:
     """Total balance at each save — the user's actual trajectory over sessions."""
     p = palette(dark)

@@ -8,7 +8,7 @@ import re
 import streamlit as st
 
 from ..insights import SEVERITY_ICON, SEVERITY_LABEL, Insight, generate
-from .common import active_debts, effective_budget, needs_debts, stat_row
+from .common import active_debts, effective_budget, needs_debts, stat_row, user_payments
 
 _ORDER = ["critical", "serious", "warning", "info", "good"]
 
@@ -46,14 +46,17 @@ def render() -> None:
     budget = effective_budget(debts, profile)
 
     with st.spinner("Running the numbers…"):
-        found = generate(debts, profile, budget)
+        found = generate(debts, profile, budget, user_payments())
 
     st.markdown("### Insights")
     st.caption("Ranked by how much money is on the table. Everything below is computed from "
                "your own numbers — no generic advice.")
 
     counts = {s: sum(1 for i in found if i.severity == s) for s in _ORDER}
-    savings = sum(i.stake for i in found if i.severity in ("serious", "info"))
+    # Only money still on the table. Interest already paid ranks its insight but
+    # is not something acting today can recover.
+    savings = sum(i.stake for i in found
+                  if i.severity in ("serious", "info") and i.recoverable)
     stat_row([
         ("Things to fix", str(counts["critical"] + counts["serious"]),
          "critical or serious", "critical" if counts["critical"] else "warning"),

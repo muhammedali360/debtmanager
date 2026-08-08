@@ -10,11 +10,12 @@ import streamlit as st
 
 from .. import db
 from ..insights import duration, money  # re-exported for pages
-from ..models import Debt, Profile
+from ..models import Debt, Payment, Profile
 from ..theme import FONT, palette
 
 __all__ = ["is_dark", "inject_css", "stat_row", "chart", "money", "duration",
-           "current_user", "load_state", "persist", "banner"]
+           "current_user", "load_state", "persist", "banner", "user_payments",
+           "refresh_payments"]
 
 
 def is_dark() -> bool:
@@ -158,7 +159,21 @@ def load_state(user_id: int, force: bool = False) -> tuple[list[Debt], Profile]:
     if force or "debts" not in st.session_state:
         st.session_state.debts = db.load_debts(user_id)
         st.session_state.profile = db.load_profile(user_id)
+        st.session_state.payments = db.load_payments(user_id)
     return st.session_state.debts, st.session_state.profile
+
+
+def user_payments() -> list[Payment]:
+    """The recorded ledger for the signed-in user."""
+    if "payments" not in st.session_state:
+        st.session_state.payments = db.load_payments(current_user())
+    return st.session_state.payments
+
+
+def refresh_payments(user_id: int) -> list[Payment]:
+    """Re-read the ledger after a write, so every page sees the new row."""
+    st.session_state.payments = db.load_payments(user_id)
+    return st.session_state.payments
 
 
 def persist(user_id: int, debts: list[Debt], profile: Profile, snapshot: bool = True) -> None:

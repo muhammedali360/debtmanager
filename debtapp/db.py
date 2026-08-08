@@ -16,14 +16,14 @@ import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
 import bcrypt
 
 from . import security
-from .models import Debt, Profile
+from .models import Debt, Payment, Profile
 
 DB_PATH = Path(os.environ.get("DEBTMANAGER_DB", Path(__file__).parent.parent / "data" / "debt.db"))
 
@@ -115,6 +115,7 @@ def init_db() -> None:
                 term_months     INTEGER NOT NULL DEFAULT 0,
                 subtype         TEXT NOT NULL DEFAULT 'Other',
                 current_payment REAL NOT NULL DEFAULT 0,
+                due_day         INTEGER NOT NULL DEFAULT 0,
                 position        INTEGER NOT NULL DEFAULT 0
             );
 
@@ -141,6 +142,25 @@ def init_db() -> None:
                 note    TEXT
             );
 
+            -- Payments the user actually made. History, not projection: these
+            -- rows are never recomputed, which is what lets the ledger state a
+            -- lifetime interest figure that doesn't move when an APR is edited.
+            -- debt_id goes NULL rather than cascading when an account is
+            -- deleted, so closing a card doesn't erase what it cost you.
+            CREATE TABLE IF NOT EXISTS payments (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                debt_id       INTEGER REFERENCES debts(id) ON DELETE SET NULL,
+                debt_name     TEXT NOT NULL,
+                paid_on       TEXT NOT NULL,
+                amount        REAL NOT NULL,
+                interest      REAL NOT NULL DEFAULT 0,
+                principal     REAL NOT NULL DEFAULT 0,
+                balance_after REAL,
+                note          TEXT NOT NULL DEFAULT '',
+                created_at    TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS recovery_codes (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -149,6 +169,7 @@ def init_db() -> None:
             );
 
             CREATE INDEX IF NOT EXISTS idx_debts_user ON debts(user_id, position);
+            CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id, paid_on);
             CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
             CREATE INDEX IF NOT EXISTS idx_snapshots_user ON snapshots(user_id, taken_at);
             CREATE INDEX IF NOT EXISTS idx_login_events ON login_events(email, at);
@@ -167,6 +188,7 @@ def _migrate(con: sqlite3.Connection) -> None:
             con.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
     add("sessions", "last_seen_at", "last_seen_at TEXT")
+    add("debts", "due_day", "due_day INTEGER NOT NULL DEFAULT 0")
 
 
 def _now() -> str:
@@ -466,7 +488,7 @@ def active_session_count(user_id: int) -> int:
 # ----------------------------------------------------------------------- debts
 
 _DEBT_COLS = ("name", "kind", "balance", "apr", "min_payment", "min_percent",
-              "credit_limit", "term_months", "subtype", "current_payment")
+              "credit_limit", "term_months", "subtype", "current_payment", "due_day")
 
 
 def load_debts(user_id: int) -> list[Debt]:
@@ -478,14 +500,87 @@ def load_debts(user_id: int) -> list[Debt]:
 
 
 def save_debts(user_id: int, debts: list[Debt]) -> None:
-    """Replace the user's debt set wholesale — simplest thing that stays correct."""
+    """Persist the user's debt set, keeping each row's id stable.
+
+    The page autosaves on every keystroke, so this runs constantly. It updates
+    in place rather than delete-and-reinsert because ``payments.debt_id`` points
+    here: churning ids would detach a user's payment history from their accounts
+    every time they touched a number.
+
+    Rows arriving without an id are matched to an existing row by (kind, name)
+    before being treated as new, which keeps history attached even when the
+    caller can't round-trip the id — and updates ``payments.debt_name`` on a
+    rename so the ledger follows the account.
+    """
+    assign = f"{', '.join(f'{c} = ?' for c in _DEBT_COLS)}, position = ?"
     with _conn() as con:
-        con.execute("DELETE FROM debts WHERE user_id = ?", (user_id,))
-        con.executemany(
-            f"INSERT INTO debts (user_id, position, {', '.join(_DEBT_COLS)}) "
-            f"VALUES (?, ?, {', '.join('?' * len(_DEBT_COLS))})",
-            [(user_id, i, *(getattr(d, c) for c in _DEBT_COLS)) for i, d in enumerate(debts)],
+        existing = {r["id"]: (r["kind"], r["name"])
+                    for r in con.execute("SELECT id, kind, name FROM debts WHERE user_id = ?",
+                                         (user_id,))}
+        claimed: set[int] = set()
+        for i, d in enumerate(debts):
+            row_id = d.id if d.id in existing and d.id not in claimed else None
+            if row_id is None:
+                row_id = next((eid for eid, key in existing.items()
+                               if eid not in claimed and key == (d.kind, d.name)), None)
+            values = [getattr(d, c) for c in _DEBT_COLS]
+            if row_id is None:
+                cur = con.execute(
+                    f"INSERT INTO debts (user_id, {', '.join(_DEBT_COLS)}, position) "
+                    f"VALUES (?, {', '.join('?' * len(_DEBT_COLS))}, ?)",
+                    (user_id, *values, i),
+                )
+                d.id = int(cur.lastrowid)
+            else:
+                con.execute(f"UPDATE debts SET {assign} WHERE id = ? AND user_id = ?",
+                            (*values, i, row_id, user_id))
+                if existing[row_id][1] != d.name:
+                    con.execute("UPDATE payments SET debt_name = ? WHERE debt_id = ?",
+                                (d.name, row_id))
+                claimed.add(row_id)
+                d.id = row_id
+
+        gone = [eid for eid in existing if eid not in claimed]
+        if gone:
+            con.executemany("DELETE FROM debts WHERE id = ? AND user_id = ?",
+                            [(eid, user_id) for eid in gone])
+
+
+# ------------------------------------------------------------------- payments
+
+def record_payment(user_id: int, payment: Payment) -> int:
+    """Append one payment to the ledger and return its id."""
+    with _conn() as con:
+        cur = con.execute(
+            "INSERT INTO payments (user_id, debt_id, debt_name, paid_on, amount, interest, "
+            "principal, balance_after, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, payment.debt_id, payment.debt_name, payment.paid_on.isoformat(),
+             payment.amount, payment.interest, payment.principal, payment.balance_after,
+             payment.note or "", _now()),
         )
+        payment.id = int(cur.lastrowid)
+    return payment.id
+
+
+def load_payments(user_id: int, debt_name: Optional[str] = None) -> list[Payment]:
+    """The ledger, oldest first. Filtered to one account when asked."""
+    sql = "SELECT * FROM payments WHERE user_id = ?"
+    args: list = [user_id]
+    if debt_name is not None:
+        sql += " AND debt_name = ?"
+        args.append(debt_name)
+    with _conn() as con:
+        rows = con.execute(sql + " ORDER BY paid_on, id", args).fetchall()
+    return [Payment(id=r["id"], debt_id=r["debt_id"], debt_name=r["debt_name"],
+                    paid_on=date.fromisoformat(r["paid_on"]), amount=r["amount"],
+                    interest=r["interest"], principal=r["principal"],
+                    balance_after=r["balance_after"], note=r["note"] or "")
+            for r in rows]
+
+
+def delete_payment(user_id: int, payment_id: int) -> None:
+    with _conn() as con:
+        con.execute("DELETE FROM payments WHERE id = ? AND user_id = ?", (payment_id, user_id))
 
 
 # --------------------------------------------------------------------- profile

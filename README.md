@@ -11,12 +11,20 @@ where the money is going, and find out what it would actually take to get out.
 - **A real amortization engine.** One code path (`debtapp/engine.py`) produces
   every number in the app, so the dashboard, insights, and scenarios can never
   disagree. Validated against closed-form amortization tables.
+- **Due dates and a payment ledger.** Give each account the day of the month it's
+  due and the app tracks the calendar: what's coming up, what's past due, and a
+  one-click *"I paid this"* that records the payment and reduces the balance.
+  The **Ledger** page then counts what the debt has really cost you — total paid,
+  how much of it the lender kept, and the cents-on-the-dollar split per account.
+  Those figures are recorded history, never re-derived, which makes them the only
+  numbers in the app that carry no assumptions.
 - **Visualizations**: balance projection, cumulative principal vs interest, the
   cents-on-the-dollar split, interest by year, payoff timeline, per-account
-  interest, and a strategy bake-off.
-- **~20 quantified insights**, ranked by dollars at stake — balance transfers net
-  of fees, consolidation, utilization and its credit-score cost, debt-to-income,
-  biweekly payments, windfall timing, the cost of waiting six months.
+  interest, a strategy bake-off, and the ledger's actual-payments history.
+- **~25 quantified insights**, ranked by dollars at stake — overdue payments and
+  what a miss really costs, balance transfers net of fees, consolidation,
+  utilization and its credit-score cost, debt-to-income, biweekly payments,
+  windfall timing, the cost of waiting six months.
 - **What-if sandbox**: extra payments, lump sums, annual raises, and a solver
   that works backwards from a target debt-free date to the payment it requires.
 - **Accounts and persistence** so you can come back and pick up where you left
@@ -71,11 +79,13 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-129 tests: engine math against closed-form amortization answers, insight
-correctness, the full auth surface (policy, throttling, session expiry,
-recovery codes), and end-to-end UI tests that drive every page and the login
-screen through Streamlit's `AppTest` — including empty accounts, zero-APR
-loans, and negative-amortization plans.
+217 tests: engine math against closed-form amortization answers, insight
+correctness, due-date arithmetic (month-end clamping, leap years, paid-early vs
+not-yet-paid), ledger aggregation and persistence, the full auth surface
+(policy, throttling, session expiry, recovery codes), and end-to-end UI tests
+that drive every page and the login screen through Streamlit's `AppTest` —
+including empty accounts, zero-APR loans, negative-amortization plans, and
+payments left orphaned by a deleted account.
 
 ## Persistence and deployment
 
@@ -93,6 +103,13 @@ environment variable.
 - **Money math** is monthly-compounded and rounded to the cent each month, the
   way a servicer actually posts. A 60-month loan can therefore end with a
   sub-dollar 61st stub payment — that is correct, not a bug.
+- **History and projection are kept apart.** `engine.py` projects; `payments.py`
+  records. A projection moves whenever an assumption moves, so the ledger never
+  recomputes from one — it only ever sums payments the user actually logged.
+- **A due date that has passed doesn't nag forever.** Someone who never logs
+  payments sees a countdown, not a permanent red banner; the "overdue" warning
+  only holds to the next cycle for users whose history shows they do log them.
+  A warning people learn to ignore is worse than no warning.
 - **Insights never quote a savings figure against a plan that never terminates.**
   If minimum payments would never clear the debt, the app says so and reports
   what you'd have paid and still owe, rather than inventing a number from
@@ -107,8 +124,9 @@ environment variable.
 ```
 app.py                 entry point, auth gate, navigation
 debtapp/
-  models.py            Debt / Profile, amortization formula
+  models.py            Debt / Payment / Profile, amortization formula
   engine.py            the simulation — the only place a month is defined
+  payments.py          due-date calendar + the recorded-payment ledger
   insights.py          ranked, quantified advice
   charts.py            Plotly figures
   theme.py             validated palette + Plotly template

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
+from datetime import date
 from typing import Optional
 
 CREDIT_CARD = "credit_card"
@@ -50,6 +51,7 @@ class Debt:
     term_months: int = 0  # loans only, 0 = unknown
     subtype: str = "Other"
     current_payment: float = 0.0  # what the user actually pays today
+    due_day: int = 0  # day of the month the payment is due, 0 = not set
     id: Optional[int] = None
 
     # ---------------------------------------------------------------- helpers
@@ -101,6 +103,35 @@ class Debt:
     def from_dict(cls, d: dict) -> "Debt":
         known = {f for f in cls.__dataclass_fields__}
         return cls(**{k: v for k, v in d.items() if k in known})
+
+
+@dataclass
+class Payment:
+    """One payment the user actually made — a row in the ledger.
+
+    This is *recorded history*, deliberately separate from the projections in
+    :mod:`debtapp.engine`. Projections change every time an assumption moves;
+    a payment happened and never changes again.
+
+    ``debt_id`` links to the account so a rename carries history with it, but
+    ``debt_name`` is stored alongside it so the row still reads correctly after
+    the account itself is deleted.
+    """
+
+    debt_name: str
+    paid_on: date
+    amount: float
+    interest: float = 0.0    # the slice the lender kept
+    principal: float = 0.0   # the slice that reduced the balance
+    balance_after: Optional[float] = None
+    note: str = ""
+    debt_id: Optional[int] = None
+    id: Optional[int] = None
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["paid_on"] = self.paid_on.isoformat()
+        return d
 
 
 @dataclass
