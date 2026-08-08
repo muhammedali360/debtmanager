@@ -9,11 +9,30 @@ import streamlit as st
 
 from debtapp import db
 from debtapp.ui import account, auth, debts, ledger, plan
-from debtapp.ui.common import (active_debts, build_plan, duration, inject_css, load_state,
-                               money)
+from debtapp.ui.common import (active_debts, build_plan, duration, esc_html, inject_css,
+                               load_state, money)
+from debtapp.version import build_id
 
 st.set_page_config(page_title="Debt Manager", page_icon="💸", layout="wide",
                    initial_sidebar_state="expanded")
+
+
+def _build_tag() -> None:
+    """Stamp the running commit into the corner of every screen.
+
+    Lives here, styled inline, rather than alongside the rest of the CSS in
+    ``ui.common`` — and that is the whole point of it. A hosted Streamlit
+    re-executes *this* file on every run but keeps already-imported modules
+    cached, so after a deploy ``app.py`` can be a commit ahead of everything
+    under ``debtapp/``. A badge whose job is to report that skew must not be
+    able to go stale in the same way, so it depends on nothing but a module
+    that did not exist before it.
+    """
+    st.markdown(
+        '<div style="position:fixed;right:10px;bottom:7px;z-index:90;font-size:10.5px;'
+        'letter-spacing:.02em;opacity:.5;pointer-events:none;font-variant-numeric:'
+        f'tabular-nums">build {esc_html(build_id())}</div>',
+        unsafe_allow_html=True)
 
 
 def _sidebar_summary() -> None:
@@ -39,6 +58,9 @@ def _sidebar_summary() -> None:
 def main() -> None:
     db.init_db()
     inject_css()
+    # Before the auth branch: the sign-in screen is the one an unauthenticated
+    # visitor sees, so it is the one that has to carry the build stamp.
+    _build_tag()
     auth.restore_session()
 
     if not st.session_state.get("user_id"):
