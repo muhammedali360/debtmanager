@@ -37,6 +37,20 @@ borderColor = "#e4e3dd"
 [server]
 enableXsrfProtection = true
 enableCORS = true
+# Streamlit re-executes app.py on every run but keeps already-imported modules
+# cached, so a deploy can leave the process on the new app.py and the old
+# debtapp/* — which is how a push lands on disk and changes nothing you can see
+# until someone hits Reboot.
+#
+# The file watcher is what evicts a changed module from sys.modules. Measured,
+# not assumed: it only does so while a session is *connected* at the moment the
+# file changes — Streamlit tears the watcher down with the last session, so a
+# push that lands on an idle app is never noticed at all. This helps the case
+# where a tab is already open and does nothing for the case where none is.
+#
+# "auto" reaches for inotify, whose per-container watch limits it can quietly
+# run out of; "poll" stats the files instead — a little more work, but it runs.
+fileWatcherType = "poll"
 
 [browser]
 gatherUsageStats = false
