@@ -114,6 +114,63 @@ def test_debts_page_edits_persist_to_the_database(user):
     assert db.load_profile(uid).monthly_budget == 2_000.0
 
 
+def _balance(db, uid: int, name: str) -> float:
+    return next(d for d in db.load_debts(uid) if d.name == name).balance
+
+
+def _typed(at, key: str, delta: dict):
+    """Post a grid's accumulated edits the way the browser does.
+
+    The browser holds one delta per grid and grows it as you move across the
+    row, so each call passes everything typed so far — which is the point: if
+    the grid is handed data that changes identity mid-edit, the whole delta
+    lands on a widget that no longer exists and is dropped.
+    """
+    at.session_state[key] = {"edited_rows": delta, "added_rows": [], "deleted_rows": []}
+    return at.run(timeout=60)
+
+
+def test_editing_one_cell_does_not_throw_away_the_next_one(user):
+    """Each edit is autosaved back into the rows the grid was built from. If the
+    grid is rebuilt from those rows it becomes a different widget, and the cell
+    the user has moved on to is edited against a widget that has already gone."""
+    uid, db = user
+    at = _page("debtapp.ui.debts", uid, db)
+
+    at = _typed(at, "ed_cards_0", {0: {"balance": 9_000.0}})
+    assert _balance(db, uid, "Chase") == 9_000.0
+
+    at = _typed(at, "ed_cards_0", {0: {"balance": 9_000.0, "apr": 19.99}})
+    assert not at.exception
+
+    chase = next(d for d in db.load_debts(uid) if d.name == "Chase")
+    assert chase.apr == 19.99, "the second cell's edit was dropped"
+    assert chase.balance == 9_000.0, "the first cell's edit was lost on the way"
+
+
+def test_a_payment_logged_on_the_ledger_survives_a_return_to_my_debts(user):
+    """The grids hold their edits as a delta, so an edit made before the payment
+    would otherwise be replayed over the balance the payment just reduced —
+    writing the old figure back and silently undoing it."""
+    uid, db = user
+    at = _page("debtapp.ui.debts", uid, db)
+    at = _typed(at, "ed_cards_0", {0: {"balance": 8_000.0}})
+    assert _balance(db, uid, "Chase") == 8_000.0
+
+    chase_id = next(d for d in db.load_debts(uid) if d.name == "Chase").id
+    at.session_state["_mod"] = "debtapp.ui.ledger"
+    at.run(timeout=60)
+    at.button(key=f"due_btn_{chase_id}_Chase").click().run(timeout=60)
+    assert not at.exception
+    paid_down = _balance(db, uid, "Chase")
+    assert paid_down < 8_000.0
+
+    at.session_state["_mod"] = "debtapp.ui.debts"
+    at.run(timeout=60)
+    assert not at.exception
+    assert _balance(db, uid, "Chase") == pytest.approx(paid_down)
+
+
 # ------------------------------------------------- acting on whole accounts
 
 def _pick(at, name: str):
