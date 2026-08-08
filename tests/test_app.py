@@ -592,17 +592,31 @@ def test_build_tag_is_stamped_on_the_sign_in_screen():
     assert f"build {build_id()}" in " ".join(m.value for m in at.markdown)
 
 
-def test_build_id_falls_back_instead_of_raising(monkeypatch):
-    """A version badge is never worth taking the app down for, so every way git
-    can fail has to come back as a string."""
+def test_build_id_matches_git_in_a_worktree(tmp_path, monkeypatch):
+    """Conductor checks this repo out as a linked worktree, where HEAD is local
+    but the branch it names lives in the shared git dir. Reading only the
+    worktree's own directory reports "unknown" on every developer machine."""
     import subprocess
 
     from debtapp import version
 
     monkeypatch.delenv("DEBTMANAGER_BUILD", raising=False)
     version.build_id.cache_clear()
-    monkeypatch.setattr(subprocess, "run",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("no git")))
+    expected = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                              cwd=Path(__file__).parent.parent,
+                              capture_output=True, text=True).stdout.strip()
+    assert version.build_id() == expected
+    version.build_id.cache_clear()
+
+
+def test_build_id_falls_back_instead_of_raising(tmp_path, monkeypatch):
+    """A version badge is never worth taking the app down for, so a checkout
+    with no git metadata at all has to come back as a string."""
+    from debtapp import version
+
+    monkeypatch.delenv("DEBTMANAGER_BUILD", raising=False)
+    monkeypatch.setattr(version, "_ROOT", tmp_path)  # a tree with no .git
+    version.build_id.cache_clear()
     assert version.build_id() == version.UNKNOWN
     version.build_id.cache_clear()
 

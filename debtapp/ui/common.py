@@ -28,10 +28,9 @@ from .. import db
 from ..insights import duration, money  # re-exported for pages
 from ..models import Debt, Payment, Profile
 from ..theme import FONT, palette
-from ..version import build_id
 
-__all__ = ["is_dark", "inject_css", "build_tag", "stat_row", "chart", "money", "duration",
-           "esc", "text", "caption", "banner", "page_header", "section", "card", "table",
+__all__ = ["is_dark", "inject_css", "stat_row", "chart", "money", "duration", "esc",
+           "text", "caption", "banner", "page_header", "section", "card", "table",
            "current_user", "load_state", "persist", "user_payments", "refresh_payments",
            "active_debts", "effective_budget", "build_plan", "needs_debts"]
 
@@ -374,22 +373,7 @@ def inject_css() -> None:
     [class*="st-key-authcard"] [data-baseweb="tab"] {{
         font-size: 14px; font-weight: 550;
     }}
-    /* ---------------------------------------------------------- build badge */
-    /* Fixed rather than in the sidebar because the sign-in screen has no
-       sidebar, and "which commit is live?" is a question worth being able to
-       answer before you have an account to log into. */
-    .build-tag {{
-        position: fixed; right: 10px; bottom: 7px; z-index: 90;
-        font-size: 10.5px; letter-spacing: 0.02em; color: {p['muted']};
-        opacity: 0.5; font-variant-numeric: tabular-nums; pointer-events: none;
-    }}
     </style>""", unsafe_allow_html=True)
-
-
-def build_tag() -> None:
-    """Stamp the running commit into the corner of every screen."""
-    st.markdown(f'<div class="build-tag">build {esc_html(build_id())}</div>',
-                unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------ layout pieces
