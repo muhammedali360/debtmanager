@@ -1,7 +1,18 @@
-"""SQLite persistence and authentication.
+"""Persistence and authentication — SQLite locally, Postgres in production.
 
-One file, no server. ``DEBTMANAGER_DB`` overrides the location; on a hosted
-Streamlit instance point it at a mounted volume so sessions survive restarts.
+``DEBTMANAGER_DB`` picks the backend by URL scheme: a ``postgresql://`` URL uses
+Postgres, anything else is a SQLite file path. Unset means ``data/debt.db``, so
+tests and ``streamlit run`` work with no configuration.
+
+The split exists because hosted Streamlit has an ephemeral filesystem — a SQLite
+file there is wiped whenever the container sleeps or redeploys, silently losing
+every account. Point ``DEBTMANAGER_DB`` at a hosted Postgres in production; this
+is the only module that touches storage.
+
+Timestamps are stored as ISO-8601 UTC *text* on both backends. They are only
+compared to each other, and a fixed-offset ISO string sorts correctly
+lexicographically, so this sidesteps the driver-specific datetime conversions
+that make SQLite-to-Postgres ports go wrong.
 
 Passwords are bcrypt-hashed. Sessions are opaque random tokens stored in the
 database and echoed into the browser URL, so a refresh (or coming back
@@ -18,14 +29,30 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 import bcrypt
 
-from . import security
+from . import _pools, security
 from .models import Debt, Payment, Profile
 
-DB_PATH = Path(os.environ.get("DEBTMANAGER_DB", Path(__file__).parent.parent / "data" / "debt.db"))
+
+def _configured_dsn() -> str:
+    """Env var wins; fall back to Streamlit secrets so the Cloud UI works too."""
+    dsn = os.environ.get("DEBTMANAGER_DB", "")
+    if dsn:
+        return dsn
+    try:  # outside a Streamlit runtime this raises — that is fine, it means SQLite
+        import streamlit as st
+
+        return str(st.secrets.get("DEBTMANAGER_DB", "") or "")
+    except Exception:
+        return ""
+
+
+_DSN = _configured_dsn()
+IS_POSTGRES = _DSN.startswith(("postgresql://", "postgres://"))
+DB_PATH = Path(_DSN or Path(__file__).parent.parent / "data" / "debt.db")
 
 SESSION_DAYS = 30       # absolute lifetime, even if you use it every day
 SESSION_IDLE_DAYS = 7   # go quiet this long and the session dies
@@ -54,32 +81,81 @@ class RateLimited(AuthError):
         )
 
 
+class _Cx:
+    """Uniform ``execute``/``executemany`` over sqlite3 and psycopg.
+
+    Queries are written once with ``?`` placeholders and rewritten for Postgres.
+    No query in this module contains a literal ``?`` outside a placeholder, so
+    the substitution is safe.
+    """
+
+    def __init__(self, raw: Any, postgres: bool) -> None:
+        self._raw = raw
+        self._pg = postgres
+
+    def _q(self, sql: str) -> str:
+        return sql.replace("?", "%s") if self._pg else sql
+
+    def execute(self, sql: str, params=()) -> Any:
+        if self._pg:
+            cur = self._raw.cursor()
+            cur.execute(self._q(sql), params)
+            return cur
+        return self._raw.execute(sql, params)
+
+    def executemany(self, sql: str, seq) -> Any:
+        if self._pg:
+            cur = self._raw.cursor()
+            cur.executemany(self._q(sql), list(seq))
+            return cur
+        return self._raw.executemany(sql, seq)
+
+
 @contextmanager
-def _conn() -> Iterator[sqlite3.Connection]:
+def _conn() -> Iterator[_Cx]:
+    # NOTE: raising inside a `with _conn()` block discards every write made in
+    # it, on both backends. Anything that must survive an error — a failed-login
+    # record, say — has to be committed before the raise, not after.
+    if IS_POSTGRES:
+        with _pools.get(_DSN).connection() as raw:  # commits on exit, rolls back on error
+            yield _Cx(raw, True)
+        return
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys = ON")
+    con.execute("PRAGMA foreign_keys = ON")  # Postgres enforces these by default
     try:
-        yield con
+        yield _Cx(con, False)
         con.commit()
     except BaseException:
-        # NOTE: raising inside a `with _conn()` block discards every write made
-        # in it. Anything that must survive an error — a failed-login record,
-        # say — has to be committed before the raise, not after.
         con.rollback()
         raise
     finally:
         con.close()
 
 
-def init_db() -> None:
-    with _conn() as con:
-        con.executescript(
-            """
+def _integrity_errors() -> tuple:
+    if not IS_POSTGRES:
+        return (sqlite3.IntegrityError,)
+    import psycopg
+
+    return (sqlite3.IntegrityError, psycopg.errors.IntegrityError)
+
+
+def _insert_id(con: _Cx, sql: str, params: tuple) -> int:
+    """INSERT and return the new row's id. Postgres has no ``lastrowid``."""
+    if IS_POSTGRES:
+        return int(con.execute(sql + " RETURNING id", params).fetchone()["id"])
+    return int(con.execute(sql, params).lastrowid)
+
+
+# Only the id columns, float type and email collation differ between backends.
+# Emails are stored lowercased by _normalize_email, so Postgres needs no
+# case-insensitive collation to match SQLite's NOCASE.
+_SCHEMA = """
             CREATE TABLE IF NOT EXISTS users (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                id            {pk},
+                email         TEXT NOT NULL UNIQUE{nocase},
                 password_hash TEXT NOT NULL,
                 created_at    TEXT NOT NULL,
                 last_login    TEXT
@@ -94,39 +170,39 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS profiles (
                 user_id        INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-                monthly_budget REAL NOT NULL DEFAULT 0,
-                monthly_income REAL NOT NULL DEFAULT 0,
-                emergency_fund REAL NOT NULL DEFAULT 0,
+                monthly_budget {real} NOT NULL DEFAULT 0,
+                monthly_income {real} NOT NULL DEFAULT 0,
+                emergency_fund {real} NOT NULL DEFAULT 0,
                 strategy       TEXT NOT NULL DEFAULT 'avalanche',
                 custom_order   TEXT NOT NULL DEFAULT '',
                 updated_at     TEXT
             );
 
             CREATE TABLE IF NOT EXISTS debts (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                id              {pk},
                 user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 name            TEXT NOT NULL,
                 kind            TEXT NOT NULL,
-                balance         REAL NOT NULL DEFAULT 0,
-                apr             REAL NOT NULL DEFAULT 0,
-                min_payment     REAL NOT NULL DEFAULT 0,
-                min_percent     REAL NOT NULL DEFAULT 2,
-                credit_limit    REAL NOT NULL DEFAULT 0,
+                balance         {real} NOT NULL DEFAULT 0,
+                apr             {real} NOT NULL DEFAULT 0,
+                min_payment     {real} NOT NULL DEFAULT 0,
+                min_percent     {real} NOT NULL DEFAULT 2,
+                credit_limit    {real} NOT NULL DEFAULT 0,
                 term_months     INTEGER NOT NULL DEFAULT 0,
                 subtype         TEXT NOT NULL DEFAULT 'Other',
-                current_payment REAL NOT NULL DEFAULT 0,
+                current_payment {real} NOT NULL DEFAULT 0,
                 due_day         INTEGER NOT NULL DEFAULT 0,
                 position        INTEGER NOT NULL DEFAULT 0
             );
 
             -- Every save appends a row, so the user can see their trajectory.
             CREATE TABLE IF NOT EXISTS snapshots (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                id            {pk},
                 user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 taken_at      TEXT NOT NULL,
-                total_balance REAL NOT NULL,
-                total_minimum REAL NOT NULL,
-                blended_apr   REAL NOT NULL,
+                total_balance {real} NOT NULL,
+                total_minimum {real} NOT NULL,
+                blended_apr   {real} NOT NULL,
                 debt_count    INTEGER NOT NULL
             );
 
@@ -135,7 +211,7 @@ def init_db() -> None:
             -- Throttling only unregistered emails would itself leak which
             -- addresses are registered.
             CREATE TABLE IF NOT EXISTS login_events (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                id      {pk},
                 email   TEXT NOT NULL,
                 at      TEXT NOT NULL,
                 ok      INTEGER NOT NULL,
@@ -148,21 +224,21 @@ def init_db() -> None:
             -- debt_id goes NULL rather than cascading when an account is
             -- deleted, so closing a card doesn't erase what it cost you.
             CREATE TABLE IF NOT EXISTS payments (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                id            {pk},
                 user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 debt_id       INTEGER REFERENCES debts(id) ON DELETE SET NULL,
                 debt_name     TEXT NOT NULL,
                 paid_on       TEXT NOT NULL,
-                amount        REAL NOT NULL,
-                interest      REAL NOT NULL DEFAULT 0,
-                principal     REAL NOT NULL DEFAULT 0,
-                balance_after REAL,
+                amount        {real} NOT NULL,
+                interest      {real} NOT NULL DEFAULT 0,
+                principal     {real} NOT NULL DEFAULT 0,
+                balance_after {real},
                 note          TEXT NOT NULL DEFAULT '',
                 created_at    TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS recovery_codes (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                id        {pk},
                 user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 code_hash TEXT NOT NULL,
                 used_at   TEXT
@@ -174,17 +250,40 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_snapshots_user ON snapshots(user_id, taken_at);
             CREATE INDEX IF NOT EXISTS idx_login_events ON login_events(email, at);
             CREATE INDEX IF NOT EXISTS idx_recovery_user ON recovery_codes(user_id);
-            """
-        )
-        _migrate(con)
+"""
 
 
-def _migrate(con: sqlite3.Connection) -> None:
+def init_db() -> None:
+    """Create the schema and run migrations. Idempotent, and deliberately not
+    memoized: it must re-run migrations against a database that already exists,
+    which is the whole point of ``_migrate``."""
+    if IS_POSTGRES:
+        ddl = _SCHEMA.format(pk="INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY",
+                             nocase="", real="DOUBLE PRECISION")
+        with _conn() as con:
+            for stmt in (x.strip() for x in ddl.split(";")):
+                if stmt:
+                    con.execute(stmt)
+            _migrate(con)
+    else:
+        ddl = _SCHEMA.format(pk="INTEGER PRIMARY KEY AUTOINCREMENT",
+                             nocase=" COLLATE NOCASE", real="REAL")
+        with _conn() as con:
+            con._raw.executescript(ddl)
+            _migrate(con)
+
+
+def _migrate(con: _Cx) -> None:
     """Add columns that came after the first release. CREATE TABLE IF NOT EXISTS
     won't touch a table that already exists, so new columns need this."""
     def add(table: str, column: str, ddl: str) -> None:
-        cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
-        if column not in cols:
+        if IS_POSTGRES:  # no PRAGMA; the catalog is a normal queryable table
+            rows = con.execute(
+                "SELECT column_name AS name FROM information_schema.columns "
+                "WHERE table_name = ?", (table,)).fetchall()
+        else:
+            rows = con.execute(f"PRAGMA table_info({table})").fetchall()
+        if column not in {r["name"] for r in rows}:
             con.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
     add("sessions", "last_seen_at", "last_seen_at TEXT")
@@ -235,7 +334,7 @@ def _validate(email: str, password: str) -> str:
 
 # --------------------------------------------------------------- rate limiting
 
-def _seconds_locked_out(con: sqlite3.Connection, email: str) -> int:
+def _seconds_locked_out(con: _Cx, email: str) -> int:
     """How long this email must wait, based on recent failures. 0 = go ahead."""
     since = (datetime.now(timezone.utc) - LOCKOUT_WINDOW).isoformat()
     row = con.execute(
@@ -250,7 +349,7 @@ def _seconds_locked_out(con: sqlite3.Connection, email: str) -> int:
     return max(0, int(remaining))
 
 
-def _record_attempt(con: sqlite3.Connection, email: str, ok: bool, note: str = "") -> None:
+def _record_attempt(con: _Cx, email: str, ok: bool, note: str = "") -> None:
     con.execute("INSERT INTO login_events (email, at, ok, note) VALUES (?, ?, ?, ?)",
                 (email, _now(), 1 if ok else 0, note))
     if ok:
@@ -280,13 +379,13 @@ def create_user(email: str, password: str) -> int:
     pw = bcrypt.hashpw(security.normalize(password).encode(), bcrypt.gensalt())
     with _conn() as con:
         try:
-            cur = con.execute(
+            uid = _insert_id(
+                con,
                 "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
                 (email, pw.decode(), _now()),
             )
-        except sqlite3.IntegrityError:
+        except _integrity_errors():
             raise AuthError("An account with that email already exists. Try signing in.")
-        uid = int(cur.lastrowid)
         con.execute("INSERT INTO profiles (user_id, updated_at) VALUES (?, ?)", (uid, _now()))
     return uid
 
@@ -525,12 +624,12 @@ def save_debts(user_id: int, debts: list[Debt]) -> None:
                                if eid not in claimed and key == (d.kind, d.name)), None)
             values = [getattr(d, c) for c in _DEBT_COLS]
             if row_id is None:
-                cur = con.execute(
+                d.id = _insert_id(
+                    con,
                     f"INSERT INTO debts (user_id, {', '.join(_DEBT_COLS)}, position) "
                     f"VALUES (?, {', '.join('?' * len(_DEBT_COLS))}, ?)",
                     (user_id, *values, i),
                 )
-                d.id = int(cur.lastrowid)
             else:
                 con.execute(f"UPDATE debts SET {assign} WHERE id = ? AND user_id = ?",
                             (*values, i, row_id, user_id))
@@ -551,14 +650,14 @@ def save_debts(user_id: int, debts: list[Debt]) -> None:
 def record_payment(user_id: int, payment: Payment) -> int:
     """Append one payment to the ledger and return its id."""
     with _conn() as con:
-        cur = con.execute(
+        payment.id = _insert_id(
+            con,
             "INSERT INTO payments (user_id, debt_id, debt_name, paid_on, amount, interest, "
             "principal, balance_after, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (user_id, payment.debt_id, payment.debt_name, payment.paid_on.isoformat(),
              payment.amount, payment.interest, payment.principal, payment.balance_after,
              payment.note or "", _now()),
         )
-        payment.id = int(cur.lastrowid)
     return payment.id
 
 

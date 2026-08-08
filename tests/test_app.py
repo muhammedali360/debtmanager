@@ -8,6 +8,7 @@ import importlib
 from datetime import date, timedelta
 
 import pytest
+from conftest import fresh_db
 from streamlit.testing.v1 import AppTest
 
 from debtapp.models import CREDIT_CARD, TERM_LOAN, Debt, Profile
@@ -21,10 +22,7 @@ DUE_LATE = (TODAY - timedelta(days=3)).day
 
 @pytest.fixture()
 def user(tmp_path, monkeypatch):
-    monkeypatch.setenv("DEBTMANAGER_DB", str(tmp_path / "t.db"))
-    import debtapp.db as db
-    importlib.reload(db)
-    db.init_db()
+    db = fresh_db(monkeypatch, tmp_path)
     uid = db.create_user("a@b.com", "hunter2hunter2")
     db.save_debts(uid, [
         Debt(name="Chase", kind=CREDIT_CARD, balance=8_400, apr=24.99, min_payment=35,
@@ -294,10 +292,7 @@ def test_debts_with_no_due_day_are_nudged_to_add_one(user):
 
 def _auth_screen(tmp_path, monkeypatch):
     """Render the real sign-in / sign-up / recovery page."""
-    monkeypatch.setenv("DEBTMANAGER_DB", str(tmp_path / "auth_ui.db"))
-    import debtapp.db as db
-    importlib.reload(db)
-    db.init_db()
+    db = fresh_db(monkeypatch, tmp_path, "auth_ui.db")
 
     def script():
         import streamlit as st

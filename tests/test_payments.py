@@ -383,10 +383,8 @@ def test_trailing_year_interest_excludes_older_payments():
 def store(tmp_path, monkeypatch):
     """A throwaway database, wired the same way the app wires the real one."""
     import importlib
-    monkeypatch.setenv("DEBTMANAGER_DB", str(tmp_path / "ledger.db"))
-    import debtapp.db as db
-    importlib.reload(db)
-    db.init_db()
+    from conftest import fresh_db
+    db = fresh_db(monkeypatch, tmp_path, "ledger.db")
     uid = db.create_user("a@b.com", "correct-horse-battery")
     yield uid, db
     importlib.reload(db)

@@ -4,6 +4,7 @@ import importlib
 import time
 
 import pytest
+from conftest import fresh_db
 
 from debtapp import security
 
@@ -13,10 +14,7 @@ OTHER_PW = "purple-monsoon-ladder"
 
 @pytest.fixture()
 def db(tmp_path, monkeypatch):
-    monkeypatch.setenv("DEBTMANAGER_DB", str(tmp_path / "auth.db"))
-    import debtapp.db as _db
-    importlib.reload(_db)
-    _db.init_db()
+    _db = fresh_db(monkeypatch, tmp_path, "auth.db")
     yield _db
     importlib.reload(_db)
 

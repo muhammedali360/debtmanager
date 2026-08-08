@@ -89,14 +89,34 @@ payments left orphaned by a deleted account.
 
 ## Persistence and deployment
 
-Data lives in SQLite at `data/debt.db`. Override with the `DEBTMANAGER_DB`
-environment variable.
+`DEBTMANAGER_DB` selects the backend by URL scheme:
 
-> **Deploying to Streamlit Community Cloud:** the container filesystem is
-> **ephemeral** — it is wiped on every reboot and redeploy, so `data/debt.db`
-> will not survive. Point `DEBTMANAGER_DB` at a mounted volume, or switch
-> `debtapp/db.py` to a hosted Postgres (it is the only module that touches
-> storage). Everything else works unchanged.
+| Value | Backend |
+|---|---|
+| unset | SQLite at `data/debt.db` — zero setup, for local dev and tests |
+| a filesystem path | SQLite at that path |
+| `postgresql://…` | Postgres, via a pooled connection |
+
+> **Deploying to Streamlit Community Cloud you must use Postgres.** The container
+> filesystem is **ephemeral** — wiped whenever the app sleeps, reboots, or
+> redeploys — so a SQLite file there silently loses every account. Provision a
+> database (Neon's free tier is enough), then paste its **pooled** connection
+> string into the app's **Settings → Secrets** as `DEBTMANAGER_DB`.
+
+`debtapp/db.py` is the only module that touches storage. Queries are written once
+with `?` placeholders and rewritten for Postgres; the schema is a single template
+with the three type differences (identity columns, float type, email collation)
+substituted per backend, so the two cannot drift apart.
+
+Pooling lives in `debtapp/_pools.py`, one pool per DSN for the life of the
+process — deliberately a separate module, because the tests reload `db` and a
+pool held there would leak connections on every reload. `max_idle` sits below
+Neon's five-minute autosuspend so connections are retired before the server drops
+them, and the pool revalidates on checkout; otherwise the first request after an
+idle spell gets handed a dead socket.
+
+Set `DEBTMANAGER_TEST_DB` to a Postgres URL to run the suite against Postgres
+instead of SQLite. All 217 tests pass on both.
 
 ## Design notes
 
@@ -131,7 +151,8 @@ debtapp/
   charts.py            Plotly figures
   theme.py             validated palette + Plotly template
   security.py          password policy + recovery codes (no storage)
-  db.py                SQLite persistence, bcrypt auth, sessions, throttling
+  db.py                persistence (SQLite or Postgres), bcrypt auth, sessions
+  _pools.py            Postgres connection pools, one per DSN
   ui/                  one module per page
 tests/                 engine, insight, and end-to-end UI tests
 ```
