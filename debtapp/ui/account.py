@@ -21,26 +21,29 @@ def render() -> None:
     left, right = st.columns(2)
     with left:
         st.markdown("**Change password**")
-        old = st.text_input("Current password", type="password", key="ac_old")
-        new = st.text_input("New password", type="password", key="ac_new",
-                            help=f"At least {security.MIN_LENGTH} characters.")
-        if new:
-            score, label = security.password_strength(new)
-            st.progress(score / 4, text=label)
-            for p in security.password_problems(new, db.get_email(uid))[:2]:
-                st.caption(f"• {p}")
-        new2 = st.text_input("Confirm new password", type="password", key="ac_new2")
-        if st.button("Update password"):
-            if new != new2:
-                st.error("The two new passwords don't match.")
-            else:
-                try:
-                    db.change_password(uid, old, new)
-                    st.success("Password updated — every session was signed out, including "
-                               "this one. Sign in again with the new password.")
-                    auth.sign_out()
-                except db.AuthError as e:
-                    st.error(str(e))
+        # In a form so the confirmation field's current value reaches the click —
+        # see the note in auth.render().
+        with st.form("change_password"):
+            old = st.text_input("Current password", type="password", key="ac_old")
+            new = st.text_input("New password", type="password", key="ac_new",
+                                help=f"At least {security.MIN_LENGTH} characters.")
+            if new:
+                score, label = security.password_strength(new)
+                st.progress(score / 4, text=label)
+                for p in security.password_problems(new, db.get_email(uid))[:2]:
+                    st.caption(f"• {p}")
+            new2 = st.text_input("Confirm new password", type="password", key="ac_new2")
+            if st.form_submit_button("Update password"):
+                if new != new2:
+                    st.error("The two new passwords don't match.")
+                else:
+                    try:
+                        db.change_password(uid, old, new)
+                        st.success("Password updated — every session was signed out, including "
+                                   "this one. Sign in again with the new password.")
+                        auth.sign_out()
+                    except db.AuthError as e:
+                        st.error(str(e))
 
     with right:
         st.markdown("**Recovery codes**")

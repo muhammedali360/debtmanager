@@ -72,7 +72,7 @@ def _seed_demo(uid: int) -> None:
 
 
 def _password_feedback(pw: str, email: str = "") -> None:
-    """Live strength meter. Guidance while typing beats a rejection on submit."""
+    """Strength meter, so a rejected password comes with a reason to fix it."""
     if not pw:
         return
     score, label = security.password_strength(pw)
@@ -142,28 +142,37 @@ def render() -> None:
 
     # --------------------------------------------------------- create account
     with tab_up:
-        email_up = st.text_input("Email", key="up_email", autocomplete="username")
-        pw_up = st.text_input("Password", type="password", key="up_pw",
-                              autocomplete="new-password",
-                              help=f"At least {security.MIN_LENGTH} characters. A memorable "
-                                   "passphrase of a few words beats a short cryptic one.")
-        _password_feedback(pw_up, email_up)
-        pw2 = st.text_input("Confirm password", type="password", key="up_pw2",
-                            autocomplete="new-password")
-        demo = st.checkbox("Start with example debts I can edit", value=True)
+        # A form, not loose widgets: clicking a button while a text input still
+        # has focus can hand the callback the *previous* value of that input, so
+        # a correctly typed confirmation would come back empty and the account
+        # would be refused for a mismatch that never happened. A form submits
+        # every field's current value in one message, which is also why the two
+        # tabs either side of this one never had the problem. The cost is that
+        # the strength meter refreshes on submit rather than on each keystroke.
+        with st.form("signup"):
+            email_up = st.text_input("Email", key="up_email", autocomplete="username")
+            pw_up = st.text_input("Password", type="password", key="up_pw",
+                                  autocomplete="new-password",
+                                  help=f"At least {security.MIN_LENGTH} characters. A memorable "
+                                       "passphrase of a few words beats a short cryptic one.")
+            _password_feedback(pw_up, email_up)
+            pw2 = st.text_input("Confirm password", type="password", key="up_pw2",
+                                autocomplete="new-password")
+            demo = st.checkbox("Start with example debts I can edit", value=True)
 
-        if st.button("Create account", type="primary", width="stretch", key="do_signup"):
-            if pw_up != pw2:
-                st.error("The two passwords don't match.")
-            else:
-                try:
-                    uid = db.create_user(email_up, pw_up)
-                    if demo:
-                        _seed_demo(uid)
-                    _show_recovery_codes(db.issue_recovery_codes(uid))
-                    _sign_in(uid, remember=False)
-                except db.AuthError as e:
-                    st.error(str(e))
+            if st.form_submit_button("Create account", type="primary", width="stretch",
+                                     key="do_signup"):
+                if pw_up != pw2:
+                    st.error("The two passwords don't match.")
+                else:
+                    try:
+                        uid = db.create_user(email_up, pw_up)
+                        if demo:
+                            _seed_demo(uid)
+                        _show_recovery_codes(db.issue_recovery_codes(uid))
+                        _sign_in(uid, remember=False)
+                    except db.AuthError as e:
+                        st.error(str(e))
 
     # ------------------------------------------------------------- recovery
     with tab_reset:
