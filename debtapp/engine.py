@@ -6,7 +6,8 @@ knows how a month works, so the numbers can never disagree with each other.
 
 Month mechanics, in order:
 
-1. Interest accrues on every balance at ``apr / 12``.
+1. Interest accrues on every balance at the APR active that month. A card with
+   a 0% promotion switches to its regular APR after the promotional window.
 2. Each lender's required payment is computed *against the post-interest
    balance* (that is how card minimums actually work).
 3. If the budget cannot cover the minimums, payments are pro-rated and the
@@ -50,13 +51,19 @@ STRATEGY_BLURBS = {
 }
 
 
-def _priority(debts: Sequence[Debt], strategy: str, custom_order: Sequence[int] | None) -> list[int]:
+def _priority(
+    debts: Sequence[Debt],
+    strategy: str,
+    custom_order: Sequence[int] | None,
+    month: int = 1,
+) -> list[int]:
     """Return debt indices in the order surplus money should attack them."""
     idx = list(range(len(debts)))
     if strategy == AVALANCHE:
-        return sorted(idx, key=lambda i: (-debts[i].apr, debts[i].balance))
+        return sorted(idx, key=lambda i: (-debts[i].apr_for_month(month), debts[i].balance))
     if strategy == SNOWBALL:
-        return sorted(idx, key=lambda i: (debts[i].balance, -debts[i].apr))
+        return sorted(idx, key=lambda i: (debts[i].balance,
+                                           -debts[i].apr_for_month(month)))
     if strategy == CURRENT:
         # Surplus follows where the user already sends the most money.
         return sorted(idx, key=lambda i: (-debts[i].effective_payment(), -debts[i].apr))
@@ -159,7 +166,6 @@ def simulate(
                         strategy, budget, start_date or date.today())
 
     start_date = start_date or date.today()
-    order = _priority(debts, strategy, custom_order)
     balances = [max(0.0, d.balance) for d in debts]
 
     rows: list[dict] = []
@@ -180,7 +186,7 @@ def simulate(
         for i, d in enumerate(debts):
             if balances[i] <= 0.005:
                 continue
-            interest[i] = round(balances[i] * d.monthly_rate, 2)
+            interest[i] = round(balances[i] * d.apr_for_month(month) / 1200.0, 2)
             due[i] = round(d.required_payment(balances[i] + interest[i]), 2)
 
         required = round(sum(due), 2)
@@ -200,6 +206,10 @@ def simulate(
         else:
             pay = list(due)
             surplus = round(avail - required, 2)
+            # Avalanche follows the APR that actually applies this month. A
+            # card still at 0% belongs behind an interest-bearing balance, then
+            # moves up automatically when its regular rate takes effect.
+            order = _priority(debts, strategy, custom_order, month)
             for i in order:
                 if surplus <= 0.005:
                     break
@@ -222,7 +232,7 @@ def simulate(
                 "month": month,
                 "debt": d.name,
                 "kind": d.kind,
-                "apr": d.apr,
+                "apr": d.apr_for_month(month),
                 "start_balance": start_bal,
                 "interest": interest[i],
                 "payment": pay[i],

@@ -192,6 +192,7 @@ _SCHEMA = """
                 subtype         TEXT NOT NULL DEFAULT 'Other',
                 current_payment {real} NOT NULL DEFAULT 0,
                 due_day         INTEGER NOT NULL DEFAULT 0,
+                promo_months    INTEGER NOT NULL DEFAULT 0,
                 position        INTEGER NOT NULL DEFAULT 0
             );
 
@@ -288,6 +289,7 @@ def _migrate(con: _Cx) -> None:
 
     add("sessions", "last_seen_at", "last_seen_at TEXT")
     add("debts", "due_day", "due_day INTEGER NOT NULL DEFAULT 0")
+    add("debts", "promo_months", "promo_months INTEGER NOT NULL DEFAULT 0")
 
 
 def _now() -> str:
@@ -587,7 +589,8 @@ def active_session_count(user_id: int) -> int:
 # ----------------------------------------------------------------------- debts
 
 _DEBT_COLS = ("name", "kind", "balance", "apr", "min_payment", "min_percent",
-              "credit_limit", "term_months", "subtype", "current_payment", "due_day")
+              "credit_limit", "term_months", "subtype", "current_payment", "due_day",
+              "promo_months")
 
 
 def load_debts(user_id: int) -> list[Debt]:
@@ -723,7 +726,7 @@ def record_snapshot(user_id: int, debts: list[Debt]) -> None:
     total = sum(d.balance for d in debts)
     if not debts:
         return
-    blended = sum(d.balance * d.apr for d in debts) / total if total else 0.0
+    blended = sum(d.balance * d.current_apr for d in debts) / total if total else 0.0
     minimum = sum(d.required_payment(d.balance + d.monthly_interest) for d in debts)
     today = datetime.now(timezone.utc).date().isoformat()
     with _conn() as con:

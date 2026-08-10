@@ -138,6 +138,7 @@ def generate(
     out += _payment_calendar(debts, payments, today)
     out += _ledger_reality(payments, plan, today)
     out += _feasibility(debts, plan, budget, min_budget)
+    out += _promo_terms(debts, plan)
     out += _the_trap(debts, plan, mins, budget, min_budget)
     out += _strategy_gap(plan, aval, snow, strategy)
     out += _interest_burn(debts, plan, total_balance)
@@ -468,6 +469,10 @@ def _interest_burn(debts, plan, total_balance) -> list[Insight]:
     """
     daily = sum(d.daily_interest for d in debts)
     monthly = sum(d.monthly_interest for d in debts)
+    if monthly <= 0:
+        # Promo-specific guidance below explains the future rate change. Do not
+        # show a contradictory "you are paying $0/day in interest" warning.
+        return []
     blended = (monthly * 12 / total_balance * 100) if total_balance else 0.0
     year1 = E.where_the_money_goes(plan, 12)
 
@@ -494,27 +499,74 @@ def _interest_burn(debts, plan, total_balance) -> list[Insight]:
     )]
 
 
+def _promo_terms(debts, plan) -> list[Insight]:
+    """Show whether each true 0% APR card survives its promotional window."""
+    out = []
+    for debt in debts:
+        if not (debt.is_card and debt.promo_months > 0 and debt.apr > 0):
+            continue
+
+        payoff = plan.payoff_month.get(debt.name)
+        if payoff is not None and payoff <= debt.promo_months:
+            out.append(Insight(
+                GOOD,
+                f"{debt.name} clears before its 0% rate ends",
+                f"Your plan pays this card off in {duration(payoff)}, before its regular "
+                f"{debt.apr:.2f}% APR begins after month {debt.promo_months}.",
+                metric=f"{duration(debt.promo_months)} at 0%",
+                stake=0.0,
+            ))
+            continue
+
+        rows = plan.ledger[
+            (plan.ledger["debt"] == debt.name)
+            & (plan.ledger["month"] <= debt.promo_months)
+        ]
+        residual = debt.balance if rows.empty else float(rows.iloc[-1]["end_balance"])
+        if residual <= 0.005:
+            continue
+        first_interest = residual * debt.apr / 1200.0
+        clear_payment = debt.balance / debt.promo_months
+        out.append(Insight(
+            WARNING,
+            f"{debt.name} still has {money(residual)} left when 0% ends",
+            f"At the current plan, about **{money(residual)}** remains after the last 0% "
+            f"billing cycle. Its regular {debt.apr:.2f}% APR then begins, adding about "
+            f"{money(first_interest, cents=True)} in interest in the first month alone.",
+            action=f"To clear today's balance inside all {debt.promo_months} interest-free "
+                   f"months, target at least {money(clear_payment, cents=True)}/mo on this card.",
+            metric=f"{money(residual)} left",
+            stake=first_interest * 12,
+            recoverable=False,
+        ))
+    return out
+
+
 def _per_debt(debts, plan) -> list[Insight]:
     out = []
     if len(debts) < 2:
         return out
-    worst = max(debts, key=lambda d: d.apr)
+    charging = [d for d in debts if d.current_apr > 0]
+    if not charging:
+        return out
+    worst = max(charging, key=lambda d: d.current_apr)
     biggest_cost = max(debts, key=lambda d: d.monthly_interest)
     out.append(Insight(
         WARNING,
-        f"{worst.name} is your most expensive debt at {worst.apr:.2f}% APR",
+        f"{worst.name} is your most expensive debt at {worst.current_apr:.2f}% APR",
         f"Every $100 you send to {worst.name} earns you a guaranteed, tax-free "
-        f"**{worst.apr:.2f}% return** — better than any investment you can buy with certainty. "
+        f"**{worst.current_apr:.2f}% return** — better than any investment you can buy with "
+        "certainty. "
         f"It is currently costing {money(worst.monthly_interest)}/mo"
         + (", the largest interest line in your portfolio." if worst is biggest_cost
            else f", while {biggest_cost.name} costs the most in raw dollars "
                 f"({money(biggest_cost.monthly_interest)}/mo)."),
         action=f"Until {worst.name} is gone, every spare dollar belongs there.",
-        metric=f"{worst.apr:.2f}%",
+        metric=f"{worst.current_apr:.2f}%",
         stake=worst.monthly_interest * 12,
     ))
 
-    cheap = [d for d in debts if 0 < d.apr <= 5]
+    cheap = [d for d in debts if 0 < d.current_apr <= 5]
     if cheap:
         names = ", ".join(d.name for d in cheap)
         out.append(Insight(
@@ -523,7 +575,7 @@ def _per_debt(debts, plan) -> list[Insight]:
             f"**{names}** sits at or below 5% APR. Paying it off early is one of the *worst* uses "
             "of a spare dollar while higher-rate balances exist — and often worse than simply "
             "investing. Pay the minimum and route everything else to the expensive debt.",
-            metric=f"{min(d.apr for d in cheap):.2f}% APR",
+            metric=f"{min(d.current_apr for d in cheap):.2f}% APR",
             stake=0.0,
         ))
     return out
@@ -653,7 +705,7 @@ def _refinance(debts, plan, budget, strategy, order) -> list[Insight]:
     """Would one consolidation loan beat the current mess?"""
     out = []
     total = sum(d.balance for d in debts)
-    weighted_apr = sum(d.balance * d.apr for d in debts) / total if total else 0.0
+    weighted_apr = sum(d.balance * d.current_apr for d in debts) / total if total else 0.0
     if weighted_apr < 10 or total < 2000:
         return out
 
@@ -689,7 +741,8 @@ def _refinance(debts, plan, budget, strategy, order) -> list[Insight]:
 def _balance_transfer(debts) -> list[Insight]:
     """0% intro-APR transfer math, fee included."""
     out = []
-    candidates = [d for d in debts if d.is_card and d.apr >= 15 and d.balance >= 500]
+    candidates = [d for d in debts
+                  if d.is_card and d.promo_months <= 0 and d.apr >= 15 and d.balance >= 500]
     if not candidates:
         return out
     d = max(candidates, key=lambda x: x.balance * x.apr)
@@ -832,16 +885,17 @@ def _emergency_fund(debts, profile) -> list[Insight]:
         ))
         return out
 
-    top = max((d for d in debts if d.apr > 0), key=lambda d: d.apr, default=None)
-    if top and fund > 1000 and top.apr >= 12:
+    top = max((d for d in debts if d.current_apr > 0),
+              key=lambda d: d.current_apr, default=None)
+    if top and fund > 1000 and top.current_apr >= 12:
         deployable = min(fund - 1000, top.balance)
         if deployable > 100:
-            annual = deployable * top.apr / 100
+            annual = deployable * top.current_apr / 100
             out.append(Insight(
                 INFO,
-                f"Your idle cash is losing to {top.name} by {top.apr:.1f}% a year",
+                f"Your idle cash is losing to {top.name} by {top.current_apr:.1f}% a year",
                 f"You hold {money(fund)} in cash earning maybe 4%, while {top.name} charges "
-                f"{top.apr:.2f}%. Deploying {money(deployable)} — keeping $1,000 back as a "
+                f"{top.current_apr:.2f}%. Deploying {money(deployable)} — keeping $1,000 back as a "
                 f"buffer — is a guaranteed **{money(annual)} a year**, risk-free, tax-free, and "
                 "better than the market's long-run average.",
                 action="Keep enough back that you never have to re-borrow. A cash buffer you "

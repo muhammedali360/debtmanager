@@ -28,11 +28,13 @@ def _apply(uid: int, debts: list[Debt], profile, message: str = "") -> None:
 def _account_row(debt: Debt, index: int) -> None:
     payment = debt.effective_payment()
     status = "Paid off" if debt.balance <= 0 else f"{money(payment)}/mo"
+    rate = (f"0% for {debt.promo_months} mo, then {debt.apr:.2f}% APR"
+            if debt.is_card and debt.promo_months > 0 else f"{debt.apr:.2f}% APR")
     with st.container(key=f"account-row-{debt.id or index}"):
         info, action = st.columns([5, 1], vertical_alignment="center")
         info.markdown(esc(
             f"**{debt.name}**  \n"
-            f"{_kind_label(debt)} · {money(debt.balance)} · {debt.apr:.2f}% APR · {status}"
+            f"{_kind_label(debt)} · {money(debt.balance)} · {rate} · {status}"
             + (f" · due day {debt.due_day}" if debt.due_day else "")
         ))
         if action.button("Edit", key=f"edit_account_{debt.id or index}", width="stretch"):
@@ -67,8 +69,13 @@ def _editor(uid: int, debts: list[Debt], profile, *, index: Optional[int], kind:
         c1, c2, c3 = st.columns(3)
         balance = c1.number_input("Current balance", min_value=0.0, step=25.0,
                                   value=float(draft.balance))
-        apr = c2.number_input("APR", min_value=0.0, max_value=99.0, step=0.25,
-                              value=float(draft.apr), format="%.2f")
+        apr = c2.number_input(
+            "Regular APR" if kind == CREDIT_CARD else "APR",
+            min_value=0.0, max_value=99.0, step=0.25,
+            value=float(draft.apr), format="%.2f",
+            help=("The rate charged now, or the rate that begins after a 0% promotion."
+                  if kind == CREDIT_CARD else None),
+        )
         minimum = c3.number_input(
             "Minimum payment", min_value=0.0, step=5.0, value=float(draft.min_payment),
             help=("The dollar floor from your statement." if kind == CREDIT_CARD
@@ -88,16 +95,22 @@ def _editor(uid: int, debts: list[Debt], profile, *, index: Optional[int], kind:
                 help="Leave 0 to use the required minimum. Your total monthly plan is set on Plan.",
             )
             if kind == CREDIT_CARD:
-                c1, c2 = st.columns(2)
+                c1, c2, c3 = st.columns(3)
                 min_percent = c1.number_input(
                     "Minimum as % of balance", min_value=0.0, max_value=25.0,
                     step=0.5, value=float(draft.min_percent), format="%.1f",
-                    help="Usually 1–3%. Together with the dollar floor, this models shrinking minimums.",
+                    help="Usually 1–3%. With the dollar floor, this models shrinking minimums.",
                 )
                 credit_limit = c2.number_input(
                     "Credit limit", min_value=0.0, step=100.0,
                     value=float(draft.credit_limit),
                     help="Optional; used only for utilization recommendations.",
+                )
+                promo_months = c3.number_input(
+                    "0% months left", min_value=0, max_value=60, step=1,
+                    value=int(draft.promo_months),
+                    help="Remaining billing cycles at 0% APR. The regular APR begins the next "
+                         "month. Do not use for deferred-interest financing.",
                 )
                 term_months = 0
             else:
@@ -106,7 +119,7 @@ def _editor(uid: int, debts: list[Debt], profile, *, index: Optional[int], kind:
                     value=int(draft.term_months),
                     help="Optional; used to calculate a payment only when minimum payment is 0.",
                 )
-                min_percent, credit_limit = 0.0, 0.0
+                min_percent, credit_limit, promo_months = 0.0, 0.0, 0
 
         buttons = st.columns([1, 1, 1, 2])
         save = buttons[0].form_submit_button("Save account", type="primary", width="stretch")
@@ -137,6 +150,7 @@ def _editor(uid: int, debts: list[Debt], profile, *, index: Optional[int], kind:
         draft.current_payment = current_payment
         draft.min_percent = min_percent
         draft.credit_limit = credit_limit
+        draft.promo_months = int(promo_months)
         draft.term_months = int(term_months)
         if editing:
             if original.name != draft.name:

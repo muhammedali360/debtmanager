@@ -164,6 +164,42 @@ def test_no_balance_transfer_suggested_for_low_apr_cards():
     assert not [i for i in ins if "balance transfer" in i.title.lower()]
 
 
+def test_promo_card_warns_when_the_plan_leaves_a_balance_after_zero_percent():
+    d = card(name="Promo card", balance=6_000, apr=24.0, pays=200)
+    d.promo_months = 12
+    ins = I.generate([d], Profile(monthly_budget=200))
+    hits = [i for i in ins if "when 0% ends" in i.title]
+
+    assert hits and hits[0].severity == I.WARNING
+    assert "$3,600" in hits[0].title
+    assert "$500.00/mo" in (hits[0].action or "")
+
+
+def test_promo_card_gets_good_news_when_plan_clears_it_in_time():
+    d = card(name="Promo card", balance=1_200, apr=24.0, pays=100)
+    d.promo_months = 12
+    ins = I.generate([d], Profile(monthly_budget=100))
+
+    assert any("clears before its 0% rate ends" in i.title for i in ins)
+    assert not any("when 0% ends" in i.title for i in ins)
+
+
+def test_existing_zero_apr_card_is_not_offered_another_balance_transfer():
+    d = card(name="Promo card", balance=6_000, apr=24.0, pays=200)
+    d.promo_months = 12
+    ins = I.generate([d], Profile(monthly_budget=200))
+
+    assert not [i for i in ins if "balance transfer" in i.title.lower()]
+
+
+def test_promo_card_is_not_described_as_currently_paying_interest():
+    d = card(name="Promo card", balance=6_000, apr=24.0, pays=200)
+    d.promo_months = 12
+    ins = I.generate([d], Profile(monthly_budget=200))
+
+    assert not [i for i in ins if "paying $0.00 per day" in i.title]
+
+
 # ------------------------------------------------- due dates and real payments
 
 def _ledger(n=3, amount=250.0, interest=170.0):
