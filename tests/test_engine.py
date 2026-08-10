@@ -52,6 +52,29 @@ def test_zero_interest_debt_is_simple_division():
     assert s.total_paid == pytest.approx(1200.0, abs=0.01)
 
 
+def test_zero_apr_promotion_switches_to_regular_rate_after_exact_term():
+    d = card(balance=1_200, apr=24.0, floor=25, pct=2.0)
+    d.promo_months = 2
+    s = E.simulate([d], budget=100)
+    rows = s.ledger.set_index("month")
+
+    assert rows.loc[1, "apr"] == 0.0
+    assert rows.loc[2, "apr"] == 0.0
+    assert rows.loc[1, "interest"] == 0.0
+    assert rows.loc[2, "interest"] == 0.0
+    assert rows.loc[3, "apr"] == 24.0
+    assert rows.loc[3, "interest"] == pytest.approx(20.0)  # 2% of $1,000
+
+
+def test_card_paid_inside_zero_apr_term_never_accrues_interest():
+    d = card(balance=1_200, apr=24.0)
+    d.promo_months = 12
+    s = E.simulate([d], budget=100)
+
+    assert s.months == 12
+    assert s.total_interest == 0.0
+
+
 def test_first_month_interest_is_balance_times_monthly_rate():
     d = card(balance=10_000, apr=24.0)
     s = E.simulate([d], budget=500)
@@ -144,6 +167,17 @@ def test_avalanche_targets_the_highest_apr_first():
     ]
     av = E.simulate(debts, E.minimum_budget(debts) + 300, strategy=E.AVALANCHE)
     assert av.payoff_month["Expensive"] < av.payoff_month["Cheap"]
+
+
+def test_avalanche_uses_the_apr_active_in_each_month():
+    promo = card(name="Promo", balance=5_000, apr=30.0)
+    promo.promo_months = 3
+    charging = card(name="Charging now", balance=5_000, apr=10.0)
+    s = E.simulate([promo, charging], budget=500, strategy=E.AVALANCHE)
+    ledger = s.ledger.pivot(index="month", columns="debt", values="payment")
+
+    assert ledger.loc[1, "Charging now"] > ledger.loc[1, "Promo"]
+    assert ledger.loc[4, "Promo"] > ledger.loc[4, "Charging now"]
 
 
 def test_custom_order_is_respected():

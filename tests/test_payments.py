@@ -514,10 +514,14 @@ def test_an_existing_database_migrates_to_the_new_schema(store):
     uid, db = store
     with db._conn() as con:
         con.execute("ALTER TABLE debts DROP COLUMN due_day")
+        con.execute("ALTER TABLE debts DROP COLUMN promo_months")
         con.execute("DROP TABLE payments")
     db.init_db()  # the migration path the app runs on every boot
 
-    db.save_debts(uid, [card(due_day=9)])
+    debt = card(due_day=9)
+    debt.promo_months = 11
+    db.save_debts(uid, [debt])
     assert db.load_debts(uid)[0].due_day == 9
+    assert db.load_debts(uid)[0].promo_months == 11
     db.record_payment(uid, P.build_payment(db.load_debts(uid)[0], 250.0, date(2026, 3, 14)))
     assert len(db.load_payments(uid)) == 1

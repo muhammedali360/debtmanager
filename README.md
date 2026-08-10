@@ -17,7 +17,10 @@ where the money is going, and find out what it would actually take to get out.
   distinction and not a question anyone should answer before typing a balance.
 - **A real amortization engine.** One code path (`debtapp/engine.py`) produces
   every number in the app, so nothing on screen can disagree with anything else.
-  Validated against closed-form amortization tables.
+  Validated against closed-form amortization tables. Credit cards can also carry
+  a remaining 0% promotional term: projections charge no interest through that
+  window, switch to the regular APR afterward, and show whether the planned
+  payments clear the card before the promotion ends.
 - **Due dates and a payment ledger.** Give each account the day of the month it's
   due and the app tracks the calendar: what's coming up, what's past due, and a
   one-click *"I paid this"* that records the payment and reduces the balance.
@@ -146,7 +149,7 @@ them, and the pool revalidates on checkout; otherwise the first request after an
 idle spell gets handed a dead socket.
 
 Set `DEBTMANAGER_TEST_DB` to a Postgres URL to run the suite against Postgres
-instead of SQLite. All 227 tests pass on both.
+instead of SQLite. The same suite runs on both.
 
 ## Design notes
 
@@ -154,6 +157,10 @@ instead of SQLite. All 227 tests pass on both.
   one account reveals the six common statement fields and keeps model-specific
   details in an expander. Saving preserves the account ID and every persisted
   field, so existing users do not lose history or advanced settings.
+- **0% APR means zero during the window, not forever.** A card can store its
+  regular APR plus the number of interest-free billing cycles remaining. The
+  engine uses 0% through that term, changes rate the following month, and moves
+  the card within an avalanche plan when its active APR changes.
 - **Money math** is monthly-compounded and rounded to the cent each month, the
   way a servicer actually posts. A 60-month loan can therefore end with a
   sub-dollar 61st stub payment — that is correct, not a bug.
@@ -195,7 +202,7 @@ debtapp/
   _pools.py            Postgres connection pools, one per DSN
   ui/common.py         the stylesheet + layout primitives every page builds from
   ui/plan.py           tiles, top suggestion, projection, one what-if lever
-  ui/debts.py          the one grid + the monthly plan
+  ui/debts.py          focused account summaries and edit forms
   ui/ledger.py         due panel + recorded payments
   ui/onboarding.py     first run: one account, projected live
   ui/                  account settings and the auth screens
@@ -205,7 +212,8 @@ tools/screenshot.mjs   browser pass: screenshots + markup-leak check
 
 ## Disclaimer
 
-A planning tool, not financial advice. Projections assume unchanging APRs, no
-new borrowing, and monthly compounding. If your minimum payments are
-unaffordable, a nonprofit credit counselor (NFCC member agencies are free) will
-help more than any calculator.
+A planning tool, not financial advice. Projections assume regular APRs stay
+unchanged after any entered 0% promotional term, with no new borrowing and
+monthly compounding. Deferred-interest offers are not modelled. If your minimum
+payments are unaffordable, a nonprofit credit counselor (NFCC member agencies
+are free) will help more than any calculator.

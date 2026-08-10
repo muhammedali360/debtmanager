@@ -196,6 +196,20 @@ def _edit(at, db, uid: int, name: str):
     return at.button(key=f"edit_account_{debt.id}").click().run(timeout=60)
 
 
+def test_zero_apr_promo_terms_can_be_saved_on_a_card(user):
+    uid, db = user
+    at = _page("debtapp.ui.debts", uid, db)
+    at = _edit(at, db, uid, "Chase")
+    next(n for n in at.number_input if n.label == "0% months left").set_value(8)
+    next(b for b in at.button if b.label == "Save account").click()
+    at = at.run(timeout=60)
+
+    assert not at.exception
+    chase = next(d for d in db.load_debts(uid) if d.name == "Chase")
+    assert chase.promo_months == 8
+    assert any("0% for 8 mo" in m.value for m in at.markdown)
+
+
 def test_removing_an_account_needs_a_confirmation_first(user):
     """One click must not be able to delete an account outright — that is the
     reason removal has its own confirmation."""

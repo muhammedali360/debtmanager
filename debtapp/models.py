@@ -59,6 +59,7 @@ class Debt:
     subtype: str = "Other"
     current_payment: float = 0.0  # what the user actually pays today
     due_day: int = 0  # day of the month the payment is due, 0 = not set
+    promo_months: int = 0  # cards only: remaining billing cycles at 0% APR
     id: Optional[int] = None
 
     # ---------------------------------------------------------------- helpers
@@ -68,7 +69,23 @@ class Debt:
 
     @property
     def monthly_rate(self) -> float:
-        return self.apr / 1200.0
+        return self.apr_for_month(1) / 1200.0
+
+    @property
+    def current_apr(self) -> float:
+        """APR applying in the current projection month."""
+        return self.apr_for_month(1)
+
+    def apr_for_month(self, month: int) -> float:
+        """APR applying in a one-based projection month.
+
+        ``apr`` remains the card's regular rate. A positive ``promo_months``
+        suppresses that rate for exactly that many upcoming billing cycles.
+        Loans deliberately ignore this card-only promotion field.
+        """
+        if self.is_card and month > 0 and month <= self.promo_months:
+            return 0.0
+        return self.apr
 
     @property
     def monthly_interest(self) -> float:
@@ -77,7 +94,7 @@ class Debt:
 
     @property
     def daily_interest(self) -> float:
-        return self.balance * self.apr / 100.0 / 365.0
+        return self.balance * self.current_apr / 100.0 / 365.0
 
     @property
     def utilization(self) -> Optional[float]:
