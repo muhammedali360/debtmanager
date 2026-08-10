@@ -206,7 +206,7 @@ def render() -> None:
     rows = user_payments()
     t = P.totals(rows)
 
-    page_header("Ledger",
+    page_header("Activity",
                 "Every payment you've actually made. Unlike the projections elsewhere in the "
                 "app, nothing on this page is an estimate.")
 

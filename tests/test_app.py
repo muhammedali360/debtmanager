@@ -58,7 +58,8 @@ def _page(module_name: str, uid: int, db) -> AppTest:
     return at.run(timeout=60)
 
 
-PAGES = ["debtapp.ui.plan", "debtapp.ui.debts", "debtapp.ui.account", "debtapp.ui.ledger"]
+PAGES = ["debtapp.ui.dashboard", "debtapp.ui.plan", "debtapp.ui.debts",
+         "debtapp.ui.account", "debtapp.ui.ledger"]
 
 
 @pytest.mark.parametrize("page", PAGES)
@@ -119,6 +120,25 @@ def test_plan_shows_the_headline_numbers(user):
     assert "$28,250" in body  # 8,400 + 1,250 + 18,600
 
 
+def test_home_turns_the_projection_into_a_monthly_action(user):
+    uid, db = user
+    at = _page("debtapp.ui.dashboard", uid, db)
+    body = " ".join(m.value for m in at.markdown)
+    assert "Pay extra toward" in body
+    assert "Store card" in body
+    assert "$655 minimums + $595 extra" in body
+
+
+def test_home_recommendation_opens_a_prefilled_plan(user):
+    uid, db = user
+    at = _page("debtapp.ui.dashboard", uid, db)
+    button = next(b for b in at.button if b.label.startswith("Try +"))
+    at = button.click().run(timeout=60)
+    assert not at.exception
+    assert at.session_state["_requested_page"] == "plan"
+    assert at.session_state["plan_extra"] in (50, 100, 250)
+
+
 def test_plan_leads_with_one_suggestion_and_folds_the_rest_away(user):
     """The suggestions are ranked by dollars at stake, which is worth nothing if
     the page shows twenty of them at once."""
@@ -145,145 +165,51 @@ def test_the_extra_payment_slider_prices_a_bigger_payment(user):
     assert "Interest saved" in after and "Time saved" in after
 
 
-def test_debts_page_edits_persist_to_the_database(user):
-    """The whole point of the login: change a number, come back, still there."""
+def test_a_previewed_monthly_change_can_be_saved(user):
     uid, db = user
-    at = _page("debtapp.ui.debts", uid, db)
+    at = _page("debtapp.ui.plan", uid, db)
     assert not at.exception
-    at.number_input[0].set_value(2_000.0).run(timeout=60)  # monthly budget
+    at.slider(key="plan_extra").set_value(100).run(timeout=60)
+    next(b for b in at.button if b.label == "Use this monthly plan").click()
+    at = at.run(timeout=60)
+    assert not at.exception
+    assert db.load_profile(uid).monthly_budget == 1_350
+    assert at.slider(key="plan_extra").value == 0
+
+
+def test_plan_settings_persist_to_the_database(user):
+    uid, db = user
+    at = _page("debtapp.ui.plan", uid, db)
+    assert not at.exception
+    next(n for n in at.number_input if n.label == "Monthly debt budget").set_value(2_000.0)
+    next(b for b in at.button if b.label == "Save plan settings").click()
+    at = at.run(timeout=60)
     assert not at.exception
     assert db.load_profile(uid).monthly_budget == 2_000.0
 
 
-def _balance(db, uid: int, name: str) -> float:
-    return next(d for d in db.load_debts(uid) if d.name == name).balance
-
-
-def _typed(at, key: str, delta: dict, added=None):
-    """Post a grid's accumulated edits the way the browser does.
-
-    The browser holds one delta per grid and grows it as you move across the
-    row, so each call passes everything typed so far — which is the point: if
-    the grid is handed data that changes identity mid-edit, the whole delta
-    lands on a widget that no longer exists and is dropped.
-    """
-    at.session_state[key] = {"edited_rows": delta, "added_rows": added or [],
-                             "deleted_rows": []}
-    return at.run(timeout=60)
-
-
-def test_a_blank_minimum_percent_falls_back_to_the_model_default(user):
-    """A cell left empty means "I didn't say", not "zero".
-
-    `min_percent` is the whole minimum-payment model for a card — the required
-    payment is `max(min_payment, min_percent% of balance)`. Coercing a blank to
-    0.0 quietly deleted the percentage floor, so a card added without opening
-    the payment details projected against a minimum no lender would accept.
-    """
-    uid, db = user
-    at = _page("debtapp.ui.debts", uid, db)
-    at = _typed(at, "ed_debts_0_basic", {},
-                [{"name": "New card", "type": "Credit card", "balance": 4_000.0, "apr": 22.0}])
-    assert not at.exception
-
-    added = next(d for d in db.load_debts(uid) if d.name == "New card")
-    assert added.min_percent == 2.0, "a blank percentage silently removed the minimum floor"
-    # 2% of the balance plus this month's interest, not $0.
-    assert added.required_payment(4_000.0) == pytest.approx(80.0)
-
-
-def test_the_grid_takes_cards_and_loans_in_one_table(user):
-    """The card/loan split is a modelling distinction, not a question the user
-    should have to answer before typing anything."""
-    uid, db = user
-    at = _page("debtapp.ui.debts", uid, db)
-    at = _typed(at, "ed_debts_0_basic", {},
-                [{"name": "Bike loan", "type": "Personal", "balance": 3_000.0, "apr": 9.0}])
-    assert not at.exception
-
-    added = next(d for d in db.load_debts(uid) if d.name == "Bike loan")
-    assert added.kind == TERM_LOAN and added.subtype == "Personal"
-    assert not added.is_card
-
-
-def test_hiding_the_payment_details_does_not_wipe_them(user):
-    """The detail columns are hidden by config, not dropped from the frame. If
-    they were dropped, every autosave from the basic view would zero a minimum
-    the user set months ago."""
-    uid, db = user
-    at = _page("debtapp.ui.debts", uid, db)
-    at = _typed(at, "ed_debts_0_basic", {0: {"balance": 7_000.0}})
-    assert not at.exception
-
-    chase = next(d for d in db.load_debts(uid) if d.name == "Chase")
-    assert chase.balance == 7_000.0
-    assert (chase.min_payment, chase.min_percent, chase.credit_limit) == (35.0, 2.0, 12_000.0)
-    assert chase.due_day == DUE_TODAY
-
-
-def test_editing_one_cell_does_not_throw_away_the_next_one(user):
-    """Each edit is autosaved back into the rows the grid was built from. If the
-    grid is rebuilt from those rows it becomes a different widget, and the cell
-    the user has moved on to is edited against a widget that has already gone."""
-    uid, db = user
-    at = _page("debtapp.ui.debts", uid, db)
-
-    at = _typed(at, "ed_debts_0_basic", {0: {"balance": 9_000.0}})
-    assert _balance(db, uid, "Chase") == 9_000.0
-
-    at = _typed(at, "ed_debts_0_basic", {0: {"balance": 9_000.0, "apr": 19.99}})
-    assert not at.exception
-
-    chase = next(d for d in db.load_debts(uid) if d.name == "Chase")
-    assert chase.apr == 19.99, "the second cell's edit was dropped"
-    assert chase.balance == 9_000.0, "the first cell's edit was lost on the way"
-
-
-def test_a_payment_logged_on_the_ledger_survives_a_return_to_my_debts(user):
-    """The grids hold their edits as a delta, so an edit made before the payment
-    would otherwise be replayed over the balance the payment just reduced —
-    writing the old figure back and silently undoing it."""
-    uid, db = user
-    at = _page("debtapp.ui.debts", uid, db)
-    at = _typed(at, "ed_debts_0_basic", {0: {"balance": 8_000.0}})
-    assert _balance(db, uid, "Chase") == 8_000.0
-
-    chase_id = next(d for d in db.load_debts(uid) if d.name == "Chase").id
-    at.session_state["_mod"] = "debtapp.ui.ledger"
-    at.run(timeout=60)
-    at.button(key=f"due_btn_{chase_id}_Chase").click().run(timeout=60)
-    assert not at.exception
-    paid_down = _balance(db, uid, "Chase")
-    assert paid_down < 8_000.0
-
-    at.session_state["_mod"] = "debtapp.ui.debts"
-    at.run(timeout=60)
-    assert not at.exception
-    assert _balance(db, uid, "Chase") == pytest.approx(paid_down)
-
-
 # ------------------------------------------------- acting on whole accounts
 
-def _pick(at, name: str):
-    """Select one account in the debts page's account picker."""
-    ms = at.multiselect(key="manage_pick_0")
-    i = next(n for n, o in enumerate(ms.options) if o.startswith(name))
-    return ms.set_value([i])
+def _edit(at, db, uid: int, name: str):
+    """Open one account's focused editor."""
+    debt = next(d for d in db.load_debts(uid) if d.name == name)
+    return at.button(key=f"edit_account_{debt.id}").click().run(timeout=60)
 
 
 def test_removing_an_account_needs_a_confirmation_first(user):
     """One click must not be able to delete an account outright — that is the
-    behaviour of the table's own trash icon, and the reason this exists."""
+    reason removal has its own confirmation."""
     uid, db = user
     at = _page("debtapp.ui.debts", uid, db)
-    _pick(at, "Store card").run(timeout=60)
-    at.button(key="ask_remove").click().run(timeout=60)
+    at = _edit(at, db, uid, "Store card")
+    next(b for b in at.button if b.label == "Remove account").click()
+    at = at.run(timeout=60)
     assert not at.exception
 
     assert any("cannot be undone" in w.value for w in at.warning), "no confirmation shown"
     assert {d.name for d in db.load_debts(uid)} == {"Chase", "Store card", "Car loan"}
 
-    at.button(key="cancel_remove").click().run(timeout=60)
+    next(b for b in at.button if b.label == "Keep it").click().run(timeout=60)
     assert {d.name for d in db.load_debts(uid)} == {"Chase", "Store card", "Car loan"}
 
 
@@ -292,9 +218,11 @@ def test_confirming_a_removal_deletes_the_account_but_keeps_its_payments(user):
     _log(db, uid, "Store card", 40.0, TODAY)
 
     at = _page("debtapp.ui.debts", uid, db)
-    _pick(at, "Store card").run(timeout=60)
-    at.button(key="ask_remove").click().run(timeout=60)
-    at.button(key="do_remove").click().run(timeout=60)
+    at = _edit(at, db, uid, "Store card")
+    next(b for b in at.button if b.label == "Remove account").click()
+    at = at.run(timeout=60)
+    next(b for b in at.button if b.label == "Yes, remove").click()
+    at = at.run(timeout=60)
     assert not at.exception
 
     assert {d.name for d in db.load_debts(uid)} == {"Chase", "Car loan"}
@@ -310,9 +238,11 @@ def test_removing_an_account_drops_it_from_a_custom_payoff_order(user):
     db.save_profile(uid, Profile(monthly_budget=1_250, strategy="custom",
                                  custom_order=["Store card", "Chase", "Car loan"]))
     at = _page("debtapp.ui.debts", uid, db)
-    _pick(at, "Store card").run(timeout=60)
-    at.button(key="ask_remove").click().run(timeout=60)
-    at.button(key="do_remove").click().run(timeout=60)
+    at = _edit(at, db, uid, "Store card")
+    next(b for b in at.button if b.label == "Remove account").click()
+    at = at.run(timeout=60)
+    next(b for b in at.button if b.label == "Yes, remove").click()
+    at = at.run(timeout=60)
     assert not at.exception
     assert db.load_profile(uid).custom_order == ["Chase", "Car loan"]
 
@@ -322,8 +252,9 @@ def test_marking_an_account_paid_off_zeroes_the_payment_too(user):
     account that no longer exists."""
     uid, db = user
     at = _page("debtapp.ui.debts", uid, db)
-    _pick(at, "Store card").run(timeout=60)
-    at.button(key="mark_paid").click().run(timeout=60)
+    at = _edit(at, db, uid, "Store card")
+    next(b for b in at.button if b.label == "Mark paid off").click()
+    at = at.run(timeout=60)
     assert not at.exception
 
     after = next(d for d in db.load_debts(uid) if d.name == "Store card")
@@ -332,16 +263,31 @@ def test_marking_an_account_paid_off_zeroes_the_payment_too(user):
     assert len(db.load_debts(uid)) == 3, "paying off must not delete the account"
 
 
-def test_the_account_actions_stay_out_of_the_way_until_something_is_picked(user):
+def test_account_details_stay_out_of_the_way_until_editing(user):
     uid, db = user
     at = _page("debtapp.ui.debts", uid, db)
-    idle = {b.key: b.disabled for b in at.button if b.key in ("mark_paid", "ask_remove")}
-    assert idle == {"mark_paid": True, "ask_remove": True}
-    assert not any(b.key in ("do_remove", "cancel_remove") for b in at.button)
+    assert not at.number_input, "account fields leaked into the summary list"
+    at = _edit(at, db, uid, "Chase")
+    assert at.number_input
+    assert sum(b.label == "Edit" for b in at.button) == 1
+    assert {"Save account", "Mark paid off", "Remove account"} <= \
+        {b.label for b in at.button}
 
-    _pick(at, "Chase").run(timeout=60)
-    live = {b.key: b.disabled for b in at.button if b.key in ("mark_paid", "ask_remove")}
-    assert live == {"mark_paid": False, "ask_remove": False}
+
+def test_editing_an_existing_account_preserves_its_identity_and_details(user):
+    """Existing users' IDs and advanced fields must survive the new focused form."""
+    uid, db = user
+    before = next(d for d in db.load_debts(uid) if d.name == "Chase")
+    at = _page("debtapp.ui.debts", uid, db)
+    at = _edit(at, db, uid, "Chase")
+    at.text_input[0].set_value("Primary card")
+    next(b for b in at.button if b.label == "Save account").click()
+    at = at.run(timeout=60)
+    assert not at.exception
+    after = next(d for d in db.load_debts(uid) if d.name == "Primary card")
+    assert after.id == before.id
+    assert (after.kind, after.min_percent, after.credit_limit, after.due_day) == \
+        (before.kind, before.min_percent, before.credit_limit, before.due_day)
 
 
 def test_a_never_paying_plan_does_not_crash_any_page(user):

@@ -8,7 +8,7 @@ from __future__ import annotations
 import streamlit as st
 
 from debtapp import db
-from debtapp.ui import account, auth, debts, ledger, plan
+from debtapp.ui import account, auth, dashboard, debts, ledger, plan
 from debtapp.ui.common import (active_debts, build_plan, duration, esc_html, inject_css,
                                load_state, money)
 from debtapp.version import build_id
@@ -82,26 +82,25 @@ def main() -> None:
     _sidebar_summary()
     st.sidebar.divider()
 
-    # Three pages, because there are three things to do here: decide, record
-    # what you owe, record what you paid. Dashboard, Insights and What-if were
-    # all the same projection and are now one page; Account is settings and is
-    # demoted out of the main list rather than sitting beside them as a peer.
-    #
-    # Every page callable is named ``render``, so the URL path has to be given
-    # explicitly — Streamlit would otherwise infer "render" for all of them.
+    # Four plain-language destinations: act now, update balances, tune the
+    # projection, and record reality. Account settings remains in a separate,
+    # visually secondary section so it does not compete with those tasks.
+    pages = {
+        "home": st.Page(dashboard.render, title="Home", icon=":material/home:",
+                        url_path="home", default=True),
+        "accounts": st.Page(debts.render, title="Accounts", icon=":material/credit_card:",
+                            url_path="debts"),
+        "plan": st.Page(plan.render, title="Plan", icon=":material/insights:",
+                        url_path="plan"),
+        "activity": st.Page(ledger.render, title="Activity", icon=":material/receipt_long:",
+                            url_path="ledger"),
+        "account": st.Page(account.render, title="Account settings",
+                           icon=":material/settings:", url_path="account"),
+    }
+    st.session_state["_nav_pages"] = pages
     nav = st.navigation({
-        "Your debt": [
-            st.Page(plan.render, title="Plan", icon=":material/insights:",
-                    url_path="plan", default=True),
-            st.Page(debts.render, title="My debts", icon=":material/credit_card:",
-                    url_path="debts"),
-            st.Page(ledger.render, title="Ledger", icon=":material/receipt_long:",
-                    url_path="ledger"),
-        ],
-        "Settings": [
-            st.Page(account.render, title="Account", icon=":material/settings:",
-                    url_path="account"),
-        ],
+        "Your debt": [pages["home"], pages["accounts"], pages["plan"], pages["activity"]],
+        "Settings": [pages["account"]],
     })
 
     if st.sidebar.button("Sign out", width="stretch"):

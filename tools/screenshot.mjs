@@ -24,9 +24,9 @@ const out = process.argv[2] || 'shots';
 const only = process.argv.slice(3);
 
 // Indexed, not named: each nav link's accessible name includes the Material
-// icon ligature, so "Plan" never matches exactly. Order follows st.navigation()
-// in app.py — the "Settings" section's pages come after "Your debt"'s.
-const PAGES = ['plan', 'debts', 'ledger', 'account'];
+// icon ligature, so labels never match exactly. Order follows st.navigation()
+// in app.py. Account settings is intentionally hidden from primary navigation.
+const PAGES = ['home', 'debts', 'plan', 'ledger'];
 mkdirSync(out, { recursive: true });
 
 const settle = async (page, ms = 2500) => {

@@ -211,7 +211,7 @@ def _forms() -> None:
             _password_feedback(pw_up, email_up)
             pw2 = st.text_input("Confirm password", type="password", key="up_pw2",
                                 autocomplete="new-password")
-            demo = st.checkbox("Start with example debts I can edit", value=True)
+            demo = st.checkbox("Explore with clearly labeled sample debts", value=False)
 
             if st.form_submit_button("Create account", type="primary", width="stretch",
                                      key="do_signup"):

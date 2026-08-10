@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Union
 
 from . import engine as E
 from . import payments as P
@@ -57,6 +57,11 @@ class Insight:
     # only the recoverable ones, so a loose flag here turns into a headline
     # figure the app cannot stand behind.
     recoverable: bool = True
+    # Optional UI hand-off. Insight generation stays pure: it describes the
+    # destination and preset, while the Streamlit layer decides how to open it.
+    action_type: Optional[str] = None
+    action_value: Optional[Union[float, str]] = None
+    action_label: Optional[str] = None
 
     @property
     def sort_key(self) -> tuple:
@@ -163,12 +168,14 @@ def _payment_calendar(debts, payments, today) -> list[Insight]:
             out.append(Insight(
                 INFO,
                 "Add your due dates and this app can watch the calendar for you",
-                "None of your accounts have a due day on file. Add one to each on the *My debts* "
+                "None of your accounts have a due day on file. Add one to each in *Accounts* "
                 "page and you'll get a running list of what's coming, a one-click way to record "
                 "each payment, and a ledger of what this debt has really cost you.",
                 action="It takes about a minute and it's the only number here you can read "
                        "straight off a statement.",
                 stake=0.0,
+                action_type="accounts",
+                action_label="Add due dates",
             ))
         return out
 
@@ -304,6 +311,9 @@ def _feasibility(debts, plan, budget, min_budget) -> list[Insight]:
             metric=f"{money(gap)}/mo short",
             stake=gap * 12,
             recoverable=False,
+            action_type="plan_budget",
+            action_value=min_budget,
+            action_label="Fix my monthly plan",
         ))
     if plan.never_pays_off:
         out.append(Insight(
@@ -316,6 +326,9 @@ def _feasibility(debts, plan, budget, min_budget) -> list[Insight]:
             metric="Never",
             stake=sum(d.balance for d in debts),
             recoverable=False,
+            action_type="plan_budget",
+            action_value=E.minimum_budget(debts) * 1.25,
+            action_label="Try a workable payment",
         ))
     for d in debts:
         req = d.required_payment(d.balance + d.monthly_interest)
@@ -403,6 +416,9 @@ def _strategy_gap(plan, aval, snow, strategy) -> list[Insight]:
                    "APR until it's gone.",
             metric=duration(aval.months),
             stake=aval.total_interest,
+            action_type="plan_strategy",
+            action_value=E.AVALANCHE,
+            action_label="Preview avalanche",
         ))
     elif strategy != E.AVALANCHE and _quotable(plan, aval):
         saved, months = _delta(plan, aval)
@@ -418,6 +434,9 @@ def _strategy_gap(plan, aval, snow, strategy) -> list[Insight]:
                        "the rest.",
                 metric=money(saved),
                 stake=saved,
+                action_type="plan_strategy",
+                action_value=E.AVALANCHE,
+                action_label="Preview avalanche",
             ))
     cost, months = _delta(snow, aval)
     if cost > 1 and strategy != E.SNOWBALL and _quotable(snow, aval):
@@ -537,6 +556,9 @@ def _extra_payments(debts, budget, strategy, order, plan) -> list[Insight]:
                 action=f"This is the single most important number on this page. Find {label}.",
                 metric=duration(alt.months),
                 stake=alt.total_interest,
+                action_type="plan_extra",
+                action_value=extra,
+                action_label=f"Try +{label}/month",
             )]
         saved, months = _delta(plan, alt)
         if saved > 1 and _quotable(plan, alt):
@@ -575,6 +597,9 @@ def _extra_payments(debts, budget, strategy, order, plan) -> list[Insight]:
         # The headlined rung, not the largest: `stake` is what ranks the card and
         # gets quoted back, so it has to be the number the title already claims.
         stake=saved,
+        action_type="plan_extra",
+        action_value=extra,
+        action_label=f"Try +{label}/month",
     )]
 
 
@@ -618,6 +643,9 @@ def _windfall(debts, budget, strategy, order, plan) -> list[Insight]:
                "that sits in a current account for a month gets spent.",
         metric=money(saved),
         stake=saved,
+        action_type="plan_lump",
+        action_value=amount,
+        action_label=f"Try a {money(amount)} payment",
     )]
 
 
@@ -799,6 +827,8 @@ def _emergency_fund(debts, profile) -> list[Insight]:
             action="Park **$1,000** in a separate savings account first, *then* go hard at the "
                    "debt. It costs you a little interest and saves you the whole plan.",
             stake=1000.0,
+            action_type="plan_settings",
+            action_label="Add my emergency fund",
         ))
         return out
 

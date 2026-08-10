@@ -5,9 +5,10 @@ where the money is going, and find out what it would actually take to get out.
 
 ## What it does
 
-- **Three pages.** *Plan* (what you owe, what to do next, when it ends), *My
-  debts* (one grid), *Ledger* (what you actually paid). Account settings sit
-  below those, out of the way.
+- **Four clear destinations.** *Home* says what to do next, *Accounts* keeps
+  balances and terms current, *Plan* lets you test and save a payoff approach,
+  and *Activity* records what you actually paid. Account settings stay in a
+  separate, visually secondary section.
 - **Two debt shapes, modelled properly.** Credit cards use a percent-of-balance
   minimum with a dollar floor — so the minimum *shrinks as you pay*, which is the
   trap. Term loans use a fixed contractual payment. The user never declares
@@ -37,17 +38,20 @@ where the money is going, and find out what it would actually take to get out.
   card with a ladder of tiers, not one card per tier), windfall timing, the cost
   of waiting six months.
 
-  The Plan page shows the **top one** and folds the rest into a drawer. Ranking
+  Home shows the highest-value next moves; Plan shows the **top one** and folds
+  the rest into a drawer. Supported recommendations open the right page with
+  the suggested amount or strategy already filled in, ready for review rather
+  than changing saved data behind the user's back. Ranking
   by dollars is only worth something if the ranking is allowed to decide what
   you read first; a wall of twenty cards spends it. Each card also carries a
   `recoverable` flag for anywhere that totals them — a stake like "minimums
   would cost you $77,876" ranks its card but is not money any action recovers.
 - **One what-if lever**: how much extra per month, priced in months saved and
-  interest saved. This replaced six sliders and a target-date solver that all
-  asked the same question in units most people cannot act on this month.
+  interest saved. A useful preview can be saved as the monthly plan in one
+  explicit click; until then it changes nothing.
 - **Accounts and persistence** so you can come back and pick up where you left
   off, plus a progress chart across check-ins. Closing an account is its own
-  decision rather than a cell edit: pick accounts on **My debts** and either
+  decision rather than a cell edit: open its focused form on **Accounts** and either
   mark them paid off — balance and payment to zero, history kept, gone from
   every projection — or remove them outright behind a confirmation. Removing
   never touches the ledger, because what a card already cost you is a fact
@@ -104,14 +108,14 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-227 tests: engine math against closed-form amortization answers, insight
+The suite covers engine math against closed-form amortization answers, insight
 correctness, due-date arithmetic (month-end clamping, leap years, paid-early vs
 not-yet-paid), ledger aggregation and persistence, the full auth surface
 (policy, throttling, session expiry, recovery codes), and end-to-end UI tests
 that drive every page and the login screen through Streamlit's `AppTest` —
 including empty accounts, zero-APR loans, negative-amortization plans, payments
 left orphaned by a deleted account, the first-run quick-add, and the grid's
-blank-cell handling.
+focused account editing and backward-compatible persistence.
 
 ## Persistence and deployment
 
@@ -146,18 +150,10 @@ instead of SQLite. All 227 tests pass on both.
 
 ## Design notes
 
-- **A blank cell means "I didn't say", not zero.** `ui/debts._from_df` fills an
-  empty numeric cell from the dataclass default rather than coercing it to 0.0.
-  `min_percent` is why this matters: it defaults to 2%, and it *is* the
-  minimum-payment model for a card (`Debt.required_payment` takes the larger of
-  the dollar floor and the percentage). Coercing blanks to zero silently deleted
-  that floor from every card added without opening the payment details, and the
-  only symptom was a projection that was too optimistic.
-- **The optional fields are optional in the layout too.** The debts grid shows
-  five columns; minimums, credit limits, terms and due dates are behind a
-  toggle, and income and savings are behind an expander. Hidden columns stay
-  *in the dataframe* and are hidden by `column_config` rather than dropped, so a
-  session spent in the basic view cannot overwrite a minimum set months ago.
+- **Account editing is focused and explicit.** The list stays scannable; opening
+  one account reveals the six common statement fields and keeps model-specific
+  details in an expander. Saving preserves the account ID and every persisted
+  field, so existing users do not lose history or advanced settings.
 - **Money math** is monthly-compounded and rounded to the cent each month, the
   way a servicer actually posts. A 60-month loan can therefore end with a
   sub-dollar 61st stub payment — that is correct, not a bug.

@@ -32,7 +32,8 @@ from ..theme import FONT, palette
 __all__ = ["is_dark", "inject_css", "stat_row", "chart", "money", "duration", "esc",
            "text", "caption", "banner", "page_header", "section", "card", "table",
            "current_user", "load_state", "persist", "user_payments", "refresh_payments",
-           "active_debts", "effective_budget", "build_plan", "needs_debts"]
+           "active_debts", "effective_budget", "build_plan", "needs_debts", "plan_brief",
+           "open_page", "open_recommendation", "toast"]
 
 
 def is_dark() -> bool:
@@ -170,6 +171,25 @@ def inject_css() -> None:
     .tile-value.good {{ color: {p['good']}; }}
     .tile-value.critical {{ color: {p['critical']}; }}
     .tile-value.warning {{ color: {p['serious']}; }}
+
+    /* ------------------------------------------------------- action brief */
+    .plan-brief {{
+        display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 1px; overflow: hidden; margin: 12px 0 8px;
+        background: {p['border']}; border: 1px solid {p['border']}; border-radius: 12px;
+    }}
+    .plan-brief > div {{ background: {p['surface']}; padding: 14px 16px; }}
+    .plan-brief .label {{
+        color: {p['muted']}; font-size: 11px; font-weight: 600;
+        letter-spacing: .05em; text-transform: uppercase; margin-bottom: 5px;
+    }}
+    .plan-brief .value {{ color: {p['text']}; font-size: 15px; font-weight: 600; }}
+    .plan-brief .note {{ color: {p['text_secondary']}; font-size: 12.5px; margin-top: 3px; }}
+
+    [class*="st-key-account-row-"] {{
+        background: {p['surface']}; border: 1px solid {p['border']};
+        border-radius: 12px; padding: 12px 15px 8px; margin-bottom: 8px;
+    }}
 
     /* --------------------------------------------------------------- cards */
     /* Charts and tables sit on their own plane. Keyed containers only — a
@@ -373,6 +393,9 @@ def inject_css() -> None:
     [class*="st-key-authcard"] [data-baseweb="tab"] {{
         font-size: 14px; font-weight: 550;
     }}
+    @media (max-width: 760px) {{
+        .plan-brief {{ grid-template-columns: 1fr; }}
+    }}
     </style>""", unsafe_allow_html=True)
 
 
@@ -414,6 +437,23 @@ def stat_row(tiles: Sequence[tuple]) -> None:
         )
     html.append("</div>")
     st.markdown("".join(html), unsafe_allow_html=True)
+
+
+def plan_brief(focus: str, amount: str, note: str, milestone: str,
+               milestone_note: str) -> None:
+    """Turn a projection into the three instructions needed this month."""
+    cells = [
+        ("Pay extra toward", focus, "after every required minimum"),
+        ("Monthly amount", amount, note),
+        ("Next milestone", milestone, milestone_note),
+    ]
+    body = "".join(
+        f'<div><div class="label">{esc_html(label)}</div>'
+        f'<div class="value">{esc_html(value)}</div>'
+        f'<div class="note">{esc_html(sub)}</div></div>'
+        for label, value, sub in cells
+    )
+    st.markdown(f'<div class="plan-brief">{body}</div>', unsafe_allow_html=True)
 
 
 @contextmanager
@@ -511,6 +551,34 @@ def needs_debts() -> bool:
     from .onboarding import first_debt
     first_debt()
     return True
+
+
+def open_page(name: str) -> None:
+    """Navigate in the app; remain testable when a page runs by itself."""
+    pages = st.session_state.get("_nav_pages", {})
+    page = pages.get(name)
+    if page is not None:
+        st.switch_page(page)
+    else:
+        st.session_state["_requested_page"] = name
+
+
+def open_recommendation(insight) -> None:
+    """Translate pure insight metadata into a pre-filled, editable UI hand-off."""
+    action = insight.action_type
+    value = insight.action_value
+    if action == "accounts":
+        open_page("accounts")
+        return
+    if action == "plan_extra":
+        st.session_state["plan_extra"] = int(round(float(value or 0) / 25) * 25)
+    elif action == "plan_budget":
+        st.session_state["recommended_budget"] = float(value or 0)
+    elif action == "plan_strategy":
+        st.session_state["recommended_strategy"] = str(value or "avalanche")
+    else:
+        return
+    open_page("plan")
 
 
 def load_state(user_id: int, force: bool = False) -> tuple[list[Debt], Profile]:

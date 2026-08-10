@@ -26,8 +26,11 @@ from .. import engine as E
 from ..insights import SEVERITY_ICON, Insight, generate
 from . import ledger
 from .common import (active_debts, banner, build_plan, caption, chart, current_user, duration,
-                     effective_budget, esc_html, is_dark, money, needs_debts, page_header,
-                     section, stat_row, user_payments)
+                     effective_budget, esc_html, is_dark, money, needs_debts,
+                     open_recommendation, page_header, persist, section, stat_row, toast,
+                     user_payments)
+
+_EXECUTABLE = {"accounts", "plan_extra", "plan_budget", "plan_strategy"}
 
 
 def _money_cols(df: pd.DataFrame, cols) -> pd.DataFrame:
@@ -79,14 +82,22 @@ def _suggestions(found: list[Insight]) -> None:
         return
     section("What to do next",
             "The single move with the most money behind it, worked out from your own numbers.")
-    st.markdown(_card(found[0]), unsafe_allow_html=True)
+    lead = found[0]
+    st.markdown(_card(lead), unsafe_allow_html=True)
+    if lead.action_type in _EXECUTABLE:
+        if st.button(lead.action_label or "Set this up", key="plan_rec_0", type="primary"):
+            open_recommendation(lead)
 
     rest = found[1:]
     if not rest:
         return
     with st.expander(f"More suggestions ({len(rest)})"):
         caption("Ranked the same way — by how many dollars are on the table.")
-        st.markdown("".join(_card(i) for i in rest), unsafe_allow_html=True)
+        for n, insight in enumerate(rest, start=1):
+            st.markdown(_card(insight), unsafe_allow_html=True)
+            if insight.action_type in _EXECUTABLE:
+                if st.button(insight.action_label or "Set this up", key=f"plan_rec_{n}"):
+                    open_recommendation(insight)
 
 
 # --------------------------------------------------------------------- what if
@@ -100,10 +111,11 @@ def _what_if(debts, profile, base: E.Schedule, dark: bool) -> None:
     monthly figure is the one they can.
     """
     section("What if you paid more?")
-    extra = st.slider("Extra each month", 0, 1_000, 0, step=25, format="$%d",
+    preset = min(1_000, max(0, int(st.session_state.get("plan_extra", 0))))
+    extra = st.slider("Extra each month", 0, 1_000, preset, step=25, format="$%d",
                       key="plan_extra",
-                      help="On top of what you already pay. Nothing here is saved — drag it "
-                           "back to $0 and your plan is exactly as it was.")
+                      help="On top of what you already pay. Preview it first, then save it as "
+                           "your monthly plan if it works for you.")
     if extra <= 0:
         caption("Drag the slider to price a bigger payment in months and dollars.")
         return
@@ -132,6 +144,44 @@ def _what_if(debts, profile, base: E.Schedule, dark: bool) -> None:
     caption(f"That's {money(extra / 30, cents=True)} a day.")
     chart(charts.plan_race({"Your plan today": base, f"With +{money(extra)}/mo": alt}, dark),
           key="race")
+    if st.button("Use this monthly plan", key="save_extra", type="primary"):
+        profile.monthly_budget = effective_budget(debts, profile) + extra
+        persist(current_user(), st.session_state.debts, profile)
+        st.session_state["reset_plan_extra"] = True
+        toast(f"Monthly plan updated to {money(profile.monthly_budget)}.")
+        st.rerun()
+
+
+def _settings(debts, profile) -> None:
+    """The two durable assumptions, kept together and out of the main flow."""
+    recommended_budget = st.session_state.pop("recommended_budget", None)
+    recommended_strategy = st.session_state.pop("recommended_strategy", None)
+    current_budget = effective_budget(debts, profile)
+    budget_default = float(recommended_budget if recommended_budget is not None
+                           else current_budget)
+    strategy_default = str(recommended_strategy or profile.strategy)
+    choices = list(E.STRATEGY_LABELS)
+    if strategy_default not in choices:
+        strategy_default = profile.strategy
+
+    with st.expander("Plan settings", expanded=recommended_budget is not None or
+                     recommended_strategy is not None):
+        caption("These are saved to your account and drive every projection.")
+        with st.form("plan_settings_form"):
+            left, right = st.columns(2)
+            budget = left.number_input("Monthly debt budget", min_value=0.0, step=25.0,
+                                       value=budget_default)
+            strategy = right.selectbox(
+                "Payoff strategy", choices, index=choices.index(strategy_default),
+                format_func=lambda value: E.STRATEGY_LABELS[value],
+            )
+            save = st.form_submit_button("Save plan settings", type="primary")
+        if save:
+            profile.monthly_budget = budget
+            profile.strategy = strategy
+            persist(current_user(), st.session_state.debts, profile)
+            toast("Plan settings saved.")
+            st.rerun()
 
 
 # ----------------------------------------------------------------- more detail
@@ -194,6 +244,11 @@ def render() -> None:
     if needs_debts():
         return
 
+    # Widget state may only be changed before its widget is instantiated. The
+    # save click sets this flag on the previous run, so reset the preview here.
+    if st.session_state.pop("reset_plan_extra", False):
+        st.session_state["plan_extra"] = 0
+
     dark = is_dark()
     debts = active_debts()
     profile = st.session_state.profile
@@ -252,6 +307,7 @@ def render() -> None:
           _schedule_table(plan), key="proj", table_label="View month-by-month schedule")
 
     _what_if(debts, profile, plan, dark)
+    _settings(debts, profile)
     _more_detail(debts, profile, plan, budget, dark)
 
     caption(
